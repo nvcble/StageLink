@@ -1,0 +1,12 @@
+[package]
+name = "receiver-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "StageLink receiver: jitter buffer, concealment, drift compensation and the personal monitor chain. Platform-free."
+
+[dependencies]
+audio-core = { workspace = true }
+audio-protocol = { workspace = true }
