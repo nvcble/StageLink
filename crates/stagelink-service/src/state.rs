@@ -61,8 +61,32 @@ pub struct ServiceState {
     pub diagnostics_streaming: Mutex<DiagnosticsSubscription>,
     /// The running audio sender, while a stream is live.
     pub sender: Mutex<Option<ActiveStream>>,
+    /// The receiver control server, once an address is known to bind to.
+    pub control_server: Mutex<Option<control_server::ControlServer>>,
+    /// The renderer event sink.
+    ///
+    /// Lives here rather than only on the control handler because the control
+    /// *server* also has things the operator needs to see — a receiver
+    /// joining, leaving or reporting — and it has no handle on the handler.
+    pub event_sink: Mutex<Option<desktop_ipc::EventSink>>,
     /// Whether this is a packaged release build. Gates the insecure transport.
     pub release_build: bool,
+}
+
+impl ServiceState {
+    /// Pushes an event to the renderer, if one is attached.
+    ///
+    /// Dropped silently otherwise: a renderer that is not listening asks for
+    /// the current state when it reconnects, so there is nothing to queue.
+    pub fn push_event(&self, event: &str, payload: serde_json::Value) {
+        if let Some(sink) = self.event_sink.lock().clone() {
+            let _ = sink.send(desktop_ipc::codec::Envelope::event(
+                event,
+                payload,
+                now_ms(),
+            ));
+        }
+    }
 }
 
 /// A live stream and what is needed to describe it.
@@ -86,6 +110,22 @@ impl Default for DiagnosticsSubscription {
 
 impl ServiceState {
     /// Builds the state, loading and validating persisted settings.
+    /// An in-memory service for tests.
+    ///
+    /// Shared rather than copied into each test module, because every copy was
+    /// the same four lines and a secret store in a temporary directory that
+    /// has to be unique per test or two tests racing would share one.
+    #[cfg(test)]
+    #[must_use]
+    pub fn for_test() -> Self {
+        let database = Database::open_in_memory().unwrap();
+        let directory =
+            std::env::temp_dir().join(format!("stagelink-state-{}", uuid::Uuid::new_v4()));
+        let secrets = SecretStore::new(&directory).unwrap();
+        Arc::try_unwrap(Self::new(database, secrets, false))
+            .unwrap_or_else(|_| unreachable!("a freshly built state has one reference"))
+    }
+
     pub fn new(database: Database, secrets: SecretStore, release_build: bool) -> Arc<Self> {
         let settings = load_settings(&database);
         let selected_adapter = settings.network.adapter_id.clone();
@@ -103,6 +143,8 @@ impl ServiceState {
             selected_adapter: Mutex::new(selected_adapter),
             diagnostics_streaming: Mutex::new(DiagnosticsSubscription::default()),
             sender: Mutex::new(None),
+            control_server: Mutex::new(None),
+            event_sink: Mutex::new(None),
             release_build,
         })
     }
@@ -145,7 +187,7 @@ fn load_settings(database: &Database) -> AppSettings {
 
     macro_rules! load_group {
         ($key:literal, $field:ident) => {
-            match repository.get(($key)) {
+            match repository.get($key) {
                 Ok(Some(value)) => settings.$field = value,
                 Ok(None) => {}
                 Err(error) => {

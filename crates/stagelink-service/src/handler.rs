@@ -15,7 +15,7 @@ use std::sync::Arc;
 use desktop_ipc::codec::ServiceErrorPayload;
 use desktop_ipc::handler::{ControlHandler, EventSink};
 use serde_json::{Value, json};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::audio_engine::AudioEngine;
 use crate::serialize;
@@ -398,6 +398,7 @@ impl StageLinkHandler {
         };
 
         let mut settings = self.state.settings_snapshot();
+        let bind_for_server = bind_address.clone();
         settings.network.adapter_id = Some(adapter_id.clone());
         settings.network.bind_address = Some(bind_address);
         settings.validate().map_err(|error| {
@@ -409,6 +410,11 @@ impl StageLinkHandler {
             .map_err(serialize::persistence_error)?;
         *self.state.settings.lock() = settings.clone();
         *self.state.selected_adapter.lock() = Some(adapter_id.clone());
+
+        // Receivers join on the adapter the operator just chose, so the
+        // listener moves with it. A listener left on the old adapter would be
+        // offering the join port on a network they did not pick.
+        self.ensure_control_server(&bind_for_server).await;
 
         let status = serialize::network_status(&adapters, Some(&adapter_id), &settings);
 
@@ -542,15 +548,59 @@ impl StageLinkHandler {
         )?;
 
         let started_at = now_ms();
+        let stream_port = sender.config().stream_port;
+
+        // Receivers that joined before the operator pressed Start — which is
+        // the normal case, since people connect their phones while the band is
+        // still setting up — are added now. Without this they would sit in the
+        // roster being sent nothing.
+        for entry in self.state.roster.lock().entries() {
+            if let Some(ip) = entry.ip_address.as_deref() {
+                if let Ok(address) = format!("{ip}:{stream_port}").parse() {
+                    sender.add_destination(&entry.receiver_id, address);
+                }
+            }
+        }
+
         *self.state.sender.lock() = Some(crate::state::ActiveStream {
             sender,
             session_id,
             started_at,
         });
 
+        // And they are told the audio parameters, because the sample rate
+        // reaches a receiver nowhere else and the one they were welcomed with
+        // was empty.
+        self.broadcast_stream_params();
+
         let status = self.stream_status();
         self.push_event("stream.status", status.clone());
         Ok(status)
+    }
+
+    /// Tells every connected receiver the current audio parameters.
+    ///
+    /// Sent on start and on any session change. A receiver must not infer the
+    /// sample rate from anything else — the packet header does not carry it,
+    /// and guessing wrong plays the mix sharp or flat in somebody's ears.
+    fn broadcast_stream_params(&self) {
+        let params = {
+            let active = self.state.sender.lock();
+            let Some(active) = active.as_ref() else { return };
+            let config = active.sender.config();
+            json!({
+                "sessionId": active.session_id,
+                "sampleRate": config.sample_rate,
+                "frameDurationMs": config.frame_duration_ms,
+                "payloadFormat": "pcm_s16le",
+                "transport": config.transport.as_str(),
+                "streamPort": config.stream_port,
+                "framesPerPacket": config.frames_per_packet(),
+            })
+        };
+        if let Some(server) = self.state.control_server.lock().as_ref() {
+            server.sessions().broadcast("stream.params", &params, now_ms());
+        }
     }
 
     /// Stops sending audio.
@@ -627,6 +677,201 @@ impl StageLinkHandler {
         }
     }
 
+    /// Sets the operator's label for a receiver.
+    ///
+    /// Persisted, so it survives the phone going into a pocket and coming
+    /// back — the whole point of having a label rather than using the device's
+    /// own name.
+    fn receivers_rename(&self, params: Value) -> Result<Value, ServiceErrorPayload> {
+        let receiver_id = Self::required_receiver_id(&params)?;
+        let display_name = params
+            .get("displayName")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| Self::invalid("displayName is required", "params.displayName"))?;
+
+        {
+            let database = self.state.database.lock();
+            persistence::ReceiverRepository::new(database.connection())
+                .set_display_name(receiver_id, display_name)
+                .map_err(serialize::persistence_error)?;
+        }
+
+        let mut roster = self.state.roster.lock();
+        let entry = roster
+            .rename(receiver_id, Some(display_name))
+            .ok_or_else(|| Self::receiver_not_found(receiver_id))?;
+        let payload = serialize::roster_entry(entry);
+        drop(roster);
+
+        self.push_roster();
+        Ok(payload)
+    }
+
+    /// Drops a receiver from this session. It may rejoin if it still has a
+    /// valid code and has not been revoked.
+    fn receivers_disconnect(&self, params: Value) -> Result<Value, ServiceErrorPayload> {
+        let receiver_id = Self::required_receiver_id(&params)?;
+
+        let entry = self
+            .state
+            .roster
+            .lock()
+            .get(receiver_id)
+            .cloned()
+            .ok_or_else(|| Self::receiver_not_found(receiver_id))?;
+
+        if let Some(server) = self.state.control_server.lock().as_ref() {
+            server.disconnect(receiver_id);
+        }
+        self.state.roster.lock().leave(receiver_id);
+        if let Some(active) = self.state.sender.lock().as_ref() {
+            active.sender.remove_destination(receiver_id);
+        }
+
+        self.push_roster();
+        Ok(serialize::roster_entry(&entry))
+    }
+
+    /// Withdraws a receiver's authorisation permanently.
+    ///
+    /// Persisted *before* the disconnect, so a device that reconnects in the
+    /// gap is already refused. The other order would leave a window in which
+    /// the operator has revoked a phone and it is back before the revocation
+    /// is recorded.
+    fn receivers_revoke(&self, params: Value) -> Result<Value, ServiceErrorPayload> {
+        let receiver_id = Self::required_receiver_id(&params)?;
+
+        {
+            let database = self.state.database.lock();
+            persistence::ReceiverRepository::new(database.connection())
+                .revoke(receiver_id, now_ms())
+                .map_err(serialize::persistence_error)?;
+        }
+
+        let entry = self.state.roster.lock().get(receiver_id).cloned();
+
+        if let Some(server) = self.state.control_server.lock().as_ref() {
+            server.disconnect(receiver_id);
+        }
+        self.state.roster.lock().leave(receiver_id);
+        if let Some(active) = self.state.sender.lock().as_ref() {
+            active.sender.remove_destination(receiver_id);
+        }
+        self.push_roster();
+
+        // A device can be revoked without being connected — an operator
+        // ejecting a phone that is already out of range, say — so a missing
+        // roster entry is reported from the database instead of as an error.
+        match entry {
+            Some(entry) => {
+                let mut payload = serialize::roster_entry(&entry);
+                payload["pairingState"] = Value::String("revoked".to_owned());
+                payload["connectionState"] = Value::String("offline".to_owned());
+                Ok(payload)
+            }
+            None => {
+                let database = self.state.database.lock();
+                let record = persistence::ReceiverRepository::new(database.connection())
+                    .get(receiver_id)
+                    .map_err(serialize::persistence_error)?
+                    .ok_or_else(|| Self::receiver_not_found(receiver_id))?;
+                Ok(serialize::stored_receiver(&record))
+            }
+        }
+    }
+
+    fn required_receiver_id(params: &Value) -> Result<&str, ServiceErrorPayload> {
+        params
+            .get("receiverId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| Self::invalid("receiverId is required", "params.receiverId"))
+    }
+
+    fn receiver_not_found(receiver_id: &str) -> ServiceErrorPayload {
+        ServiceErrorPayload::new(
+            "RECEIVER_NOT_FOUND",
+            format!("No receiver {receiver_id} is known."),
+        )
+    }
+
+    /// Pushes the roster to the renderer.
+    fn push_roster(&self) {
+        let roster = self.state.roster.lock();
+        let receivers: Vec<Value> = roster
+            .entries()
+            .iter()
+            .map(serialize::roster_entry)
+            .collect();
+        drop(roster);
+        self.push_event("receivers.changed", json!({ "receivers": receivers }));
+    }
+
+    /// Makes sure the receiver control server is listening on `bind_address`.
+    ///
+    /// Started lazily rather than at boot, because until an adapter is chosen
+    /// there is no address to bind to — and binding to all of them would put
+    /// the join port on every network the machine is attached to, including a
+    /// venue's guest Wi-Fi.
+    pub async fn ensure_control_server(&self, bind_address: &str) {
+        {
+            let running = self.state.control_server.lock();
+            if running
+                .as_ref()
+                .is_some_and(|server| server.local_address().ip().to_string() == bind_address)
+            {
+                return;
+            }
+        }
+
+        // The address changed, so the old listener is on the wrong network.
+        self.state.control_server.lock().take();
+
+        let settings = self.state.settings_snapshot();
+        let host = Arc::new(crate::control_task::ServiceControlHost::new(
+            Arc::clone(&self.state),
+            {
+                let state = Arc::clone(&self.state);
+                Arc::new(move |event: &str, payload: Value| {
+                    state.push_event(event, payload);
+                })
+            },
+        ));
+
+        let config = control_server::ControlServerConfig {
+            bind_address: bind_address.to_owned(),
+            port: settings.network.control_port,
+        };
+        match control_server::ControlServer::start(config, host).await {
+            Ok(server) => {
+                info!(address = %server.local_address(), "receivers can now join");
+                *self.state.control_server.lock() = Some(server);
+            }
+            Err(error) => {
+                // Not fatal, and deliberately not an error returned to the
+                // caller: the operator asked to select an adapter or mint a
+                // code, and that part worked. The failure is surfaced as an
+                // operational error instead, with what to do about it.
+                warn!(%error, port = settings.network.control_port, "could not start the control server");
+                self.push_event(
+                    "service.error",
+                    json!({
+                        "code": "STREAM_BIND_FAILED",
+                        "message": format!(
+                            "Receivers cannot join: port {} could not be opened.",
+                            settings.network.control_port
+                        ),
+                        "detail": "Another application may be using it. Check the Network page.",
+                        "at": now_ms(),
+                        "retryable": true,
+                    }),
+                );
+            }
+        }
+    }
+
     /// Mints a join code, replacing any previous one.
     ///
     /// Rotation is the whole mechanism for "that QR got shared" — the old token
@@ -653,6 +898,12 @@ impl StageLinkHandler {
                      access point on the Network page.",
                 )
             })?;
+
+        // Minting a code is the moment it matters that something is listening:
+        // the operator is about to hold a QR up to a band. Starting the server
+        // here as well as on adapter selection means a code is never displayed
+        // for a port nobody is accepting on.
+        self.ensure_control_server(&host).await;
 
         let code = receiver_session::JoinCode::mint(
             now_ms(),
@@ -734,12 +985,9 @@ impl ControlHandler for StageLinkHandler {
             // receivers
             "receivers.list" => self.receivers_list(),
             "receivers.createJoinCode" => self.receivers_create_join_code().await,
-            // These act on a receiver that has joined, which needs the control
-            // server. Minting the code is local and works today; accepting a
-            // connection does not.
-            "receivers.rename" | "receivers.disconnect" | "receivers.revoke" => {
-                Err(Self::not_implemented(method, "Phase 5 (receiver connections)"))
-            }
+            "receivers.rename" => self.receivers_rename(params),
+            "receivers.disconnect" => self.receivers_disconnect(params),
+            "receivers.revoke" => self.receivers_revoke(params),
 
             // Called by a receiver, not by the desktop UI. They arrive on the
             // control server, which does not exist yet, so right now they are
@@ -815,7 +1063,10 @@ impl ControlHandler for StageLinkHandler {
             serialize::service_info(&self.state),
             now_ms(),
         ));
-        *self.event_sink.lock() = Some(sink);
+        *self.event_sink.lock() = Some(sink.clone());
+        // Also shared, so the control server can report a receiver joining
+        // or leaving without a handle on this handler.
+        *self.state.event_sink.lock() = Some(sink);
         debug!("event sink attached");
     }
 
@@ -907,15 +1158,13 @@ mod tests {
     #[tokio::test]
     async fn unimplemented_methods_report_not_implemented_with_a_phase() {
         let handler = handler();
-        // `stream.start` and `stream.stop` used to be here; they are real now,
-        // which is why the list is shorter than it was.
-        for method in [
-            "receivers.rename",
-            "receivers.disconnect",
-            "receivers.revoke",
-            "receiver.heartbeat",
-            "receiver.telemetry",
-        ] {
+        // Only these two remain, and they are not "not built yet" — they are
+        // refused on *this* path for good. A heartbeat only means something
+        // attributed to an admitted receiver, and a pipe client has no
+        // receiver identity; honouring one here would let the renderer keep a
+        // phantom device alive in the roster. The control server implements
+        // them against the connection's own identity.
+        for method in ["receiver.heartbeat", "receiver.telemetry"] {
             match handler.handle(method, json!({})).await {
                 Err(error) => {
                     assert_eq!(error.code, "NOT_IMPLEMENTED", "for {method}");
@@ -1130,6 +1379,173 @@ mod tests {
             list["joinCode"]["token"], second["token"],
             "only the newest code is live"
         );
+    }
+
+    /// Joins a receiver through the control host, which is how one really
+    /// appears — there is no other way to put something in the roster.
+    fn join_a_receiver(handler: &StageLinkHandler, key: &str) -> String {
+        let host = crate::control_task::ServiceControlHost::new(
+            handler.state(),
+            Arc::new(|_event: &str, _payload: Value| {}),
+        );
+        let admission = control_server::join::Admission {
+            receiver_id: control_server::join::receiver_id_for(key),
+            identity: receiver_session::ReceiverIdentity::from_wire(
+                "Pixel 8",
+                "android",
+                Some("14".to_owned()),
+                Some("0.1.0".to_owned()),
+            ),
+            address: "10.0.0.5:51000".parse().unwrap(),
+        };
+        control_server::server::ControlHost::on_joined(&host, &admission);
+        admission.receiver_id
+    }
+
+    #[tokio::test]
+    async fn a_joined_receiver_appears_in_the_list_with_its_own_name() {
+        let handler = handler();
+        let receiver_id = join_a_receiver(&handler, "ab");
+
+        let list = handler.handle("receivers.list", Value::Null).await.unwrap();
+        let receivers = list["receivers"].as_array().unwrap();
+        assert_eq!(receivers.len(), 1);
+        assert_eq!(receivers[0]["id"], receiver_id);
+        assert_eq!(receivers[0]["deviceName"], "Pixel 8");
+        assert_eq!(receivers[0]["platform"], "android");
+        assert_eq!(receivers[0]["pairingState"], "approved");
+    }
+
+    #[tokio::test]
+    async fn renaming_a_receiver_sets_the_label_the_operator_sees() {
+        let handler = handler();
+        let receiver_id = join_a_receiver(&handler, "ab");
+
+        let renamed = handler
+            .handle(
+                "receivers.rename",
+                json!({ "receiverId": receiver_id, "displayName": "Lead Vocal" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(renamed["displayName"], "Lead Vocal");
+        assert_eq!(renamed["deviceName"], "Pixel 8", "the device name is kept");
+
+        // And it is persisted, so it survives the phone reconnecting.
+        let state = handler.state();
+        let database = state.database.lock();
+        let record = persistence::ReceiverRepository::new(database.connection())
+            .get(&receiver_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.display_name.as_deref(), Some("Lead Vocal"));
+    }
+
+    #[tokio::test]
+    async fn renaming_an_unknown_receiver_is_refused() {
+        let handler = handler();
+        let error = handler
+            .handle(
+                "receivers.rename",
+                json!({ "receiverId": "ghost", "displayName": "Nobody" }),
+            )
+            .await
+            .expect_err("there is no such receiver");
+        assert!(matches!(
+            error.code.as_str(),
+            "RECEIVER_NOT_FOUND" | "STORAGE_FAILURE"
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_empty_display_name_is_refused_rather_than_clearing_the_label() {
+        let handler = handler();
+        let receiver_id = join_a_receiver(&handler, "ab");
+        let error = handler
+            .handle(
+                "receivers.rename",
+                json!({ "receiverId": receiver_id, "displayName": "   " }),
+            )
+            .await
+            .expect_err("whitespace is not a name");
+        assert_eq!(error.code, "INVALID_REQUEST");
+    }
+
+    #[tokio::test]
+    async fn disconnecting_drops_the_receiver_but_does_not_revoke_it() {
+        let handler = handler();
+        let receiver_id = join_a_receiver(&handler, "ab");
+
+        handler
+            .handle("receivers.disconnect", json!({ "receiverId": receiver_id }))
+            .await
+            .unwrap();
+
+        let list = handler.handle("receivers.list", Value::Null).await.unwrap();
+        assert!(list["receivers"].as_array().unwrap().is_empty());
+
+        // Still approved: it may rejoin with a valid code.
+        let state = handler.state();
+        let database = state.database.lock();
+        let record = persistence::ReceiverRepository::new(database.connection())
+            .get(&receiver_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.pairing_state, "approved");
+    }
+
+    #[tokio::test]
+    async fn revoking_withdraws_the_authorisation_permanently() {
+        let handler = handler();
+        let receiver_id = join_a_receiver(&handler, "ab");
+
+        let revoked = handler
+            .handle("receivers.revoke", json!({ "receiverId": receiver_id }))
+            .await
+            .unwrap();
+        assert_eq!(revoked["pairingState"], "revoked");
+
+        let state = handler.state();
+        let database = state.database.lock();
+        let record = persistence::ReceiverRepository::new(database.connection())
+            .get(&receiver_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.pairing_state, "revoked");
+        assert!(record.revoked_at.is_some());
+    }
+
+    /// An operator ejecting a phone that has already gone out of range still
+    /// has to be able to revoke it, or the only way to withdraw access would
+    /// be to wait for the device to come back.
+    #[tokio::test]
+    async fn a_receiver_can_be_revoked_while_disconnected() {
+        let handler = handler();
+        let receiver_id = join_a_receiver(&handler, "ab");
+        handler
+            .handle("receivers.disconnect", json!({ "receiverId": receiver_id }))
+            .await
+            .unwrap();
+
+        let revoked = handler
+            .handle("receivers.revoke", json!({ "receiverId": receiver_id }))
+            .await
+            .expect("a device that is not here can still be revoked");
+        assert_eq!(revoked["pairingState"], "revoked");
+        assert_eq!(revoked["connectionState"], "offline");
+    }
+
+    #[tokio::test]
+    async fn acting_on_a_receiver_with_no_id_is_refused() {
+        let handler = handler();
+        for method in ["receivers.rename", "receivers.disconnect", "receivers.revoke"] {
+            let error = handler
+                .handle(method, json!({}))
+                .await
+                .expect_err("an id is required");
+            assert_eq!(error.code, "INVALID_REQUEST", "for {method}");
+            assert_eq!(error.field.as_deref(), Some("params.receiverId"));
+        }
     }
 
     #[tokio::test]

@@ -31,7 +31,6 @@
 //! into something closer to 6.5 ms within seconds — which a receiver sees as
 //! its buffer steadily draining.
 
-use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -429,7 +428,8 @@ fn merge_destination_changes(state: &SendLoop) {
         return;
     }
 
-    for receiver_id in table.removing.drain(..).collect::<Vec<_>>() {
+    let removing = core::mem::take(&mut table.removing);
+    for receiver_id in removing {
         table.entries.retain(|entry| entry.receiver_id != receiver_id);
     }
 
@@ -438,7 +438,8 @@ fn merge_destination_changes(state: &SendLoop) {
         state.config.frames_per_packet(),
         state.config.transport.is_encrypted(),
     );
-    for (receiver_id, address) in table.pending.drain(..).collect::<Vec<_>>() {
+    let pending = core::mem::take(&mut table.pending);
+    for (receiver_id, address) in pending {
         if table
             .entries
             .iter()

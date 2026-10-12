@@ -12,6 +12,7 @@ members = [
     "desktop-ipc",
     "stagelink-service",
     "test-receiver",
+    "control-server",
     "reference-transmitter",
     "receiver-core",
     "receiver-harness",
@@ -36,6 +37,7 @@ device-discovery = { path = "device-discovery" }
 telemetry = { path = "telemetry" }
 persistence = { path = "persistence" }
 desktop-ipc = { path = "desktop-ipc" }
+control-server = { path = "control-server" }
 reference-transmitter = { path = "reference-transmitter" }
 receiver-core = { path = "receiver-core" }
 receiver-harness = { path = "receiver-harness" }

@@ -265,6 +265,33 @@ pub fn roster_entry(entry: &RosterEntry) -> Value {
     })
 }
 
+/// A receiver that is known but not connected, as `receiverSchema`.
+///
+/// Built from the database rather than the roster, for the case where an
+/// operator acts on a device that is not here — revoking a phone that has
+/// already gone out of range, for instance. Everything live is reported as
+/// offline, because it is.
+#[must_use]
+pub fn stored_receiver(record: &persistence::ReceiverRecord) -> Value {
+    json!({
+        "id": record.id,
+        "deviceName": record.device_name,
+        "displayName": record.display_name,
+        "platform": record.platform,
+        "platformVersion": record.platform_version,
+        "appVersion": record.app_version,
+        "ipAddress": record.last_ip_address,
+        "connectionState": "offline",
+        "pairingState": record.pairing_state,
+        "firstSeenAt": record.first_seen_at,
+        "lastSeenAt": record.last_seen_at,
+        "lastHeartbeatAt": Value::Null,
+        "packetsSentToReceiver": 0,
+        "packetsDroppedLocally": 0,
+        "telemetry": Value::Null,
+    })
+}
+
 /// A join code, as `joinCodeSchema`.
 ///
 /// `host` is the address the code was minted for, carried with the code rather

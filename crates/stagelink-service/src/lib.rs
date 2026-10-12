@@ -6,6 +6,7 @@
 //! rather than a reimplementation that could drift from it.
 
 pub mod audio_engine;
+pub mod control_task;
 pub mod handler;
 pub mod serialize;
 pub mod settings;

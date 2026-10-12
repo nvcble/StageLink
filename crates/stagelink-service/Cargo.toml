@@ -26,6 +26,7 @@ audio-core = { workspace = true }
 audio-capture = { workspace = true }
 audio-protocol = { workspace = true }
 device-discovery = { workspace = true }
+control-server = { workspace = true }
 desktop-ipc = { workspace = true }
 persistence = { workspace = true }
 receiver-session = { workspace = true }
