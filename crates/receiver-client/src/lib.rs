@@ -25,6 +25,7 @@ pub mod audio;
 pub mod halves;
 pub mod control;
 pub mod join_payload;
+pub mod latest;
 pub mod session;
 
 pub use audio::{AudioSocket, SocketStats};

@@ -100,9 +100,26 @@ pub struct SlrStats {
     pub reordered: u64,
     /// Datagrams that were not valid StageLink packets.
     pub rejected: u64,
+    /// Encrypted packets this receiver had no key for.
+    ///
+    /// A few at the start of a stream are normal. A figure that keeps climbing
+    /// while nothing is heard is the one fault that otherwise looks like
+    /// perfect health from the desktop: joined, heartbeating, reporting
+    /// telemetry, and unable to open a single packet.
+    pub keyless: u64,
     /// Datagrams from an address other than the desktop we joined.
     pub foreign_datagrams: u64,
 
+    /// Absolute peak of the arriving mix, linear: 1.0 is full scale, 0.0 is
+    /// digital silence. Measured before the performer's gain, mute and EQ, so
+    /// it shows whether the desktop is still sending even to somebody who has
+    /// muted themselves.
+    ///
+    /// Sits here, beside `buffer_ms`, on purpose: two `f32` fields pack into
+    /// one eight-byte slot, so adding it cost no bytes and `SlrStats` is still
+    /// 144. The Dart struct must keep the same order — a size assertion cannot
+    /// catch two fields swapped.
+    pub arrival_peak: f32,
     /// Jitter-buffer depth, in milliseconds.
     pub buffer_ms: f32,
     /// Separate gaps concealed. More telling than a sample count: fifty short
@@ -159,8 +176,10 @@ pub fn stats_from(control: &SessionControl) -> SlrStats {
         duplicates: telemetry.duplicates,
         reordered: telemetry.reordered,
         rejected: telemetry.rejected,
+        keyless: telemetry.keyless,
         foreign_datagrams: socket.foreign(),
 
+        arrival_peak: telemetry.arrival_peak,
         buffer_ms: telemetry.buffer_health_ms as f32,
         concealed_runs: telemetry.concealed_runs,
         concealed_ms: telemetry.concealed_ms as f32,
@@ -218,7 +237,8 @@ mod tests {
         assert_eq!(align_of::<SlrEq>(), 4);
 
         // Pinned by value: if this changes, SLR_ABI_VERSION must change too.
-        assert_eq!(size_of::<SlrStats>(), 136);
+        // 136 -> 144 when `keyless` was added, at ABI 2.
+        assert_eq!(size_of::<SlrStats>(), 144);
         assert_eq!(align_of::<SlrStats>(), 8);
     }
 

@@ -66,18 +66,31 @@ pub struct Admission {
     pub audio_port: Option<u16>,
 }
 
+/// Where to send a receiver's audio.
+///
+/// The receiver's own port when it declared one, the configured stream port
+/// otherwise. Never the control connection's source port, which is an
+/// ephemeral port the OS picked and is not where anything is listening.
+///
+/// **The only place this decision is made.** Two paths need it — a receiver
+/// joining while the stream runs, and a receiver already in the roster when
+/// the operator presses Start — and a second copy of this `unwrap_or` is
+/// exactly how one of them ends up sending audio to a port nothing is
+/// listening on.
+#[must_use]
+pub fn audio_destination(
+    ip: std::net::IpAddr,
+    declared: Option<u16>,
+    configured_stream_port: u16,
+) -> SocketAddr {
+    SocketAddr::new(ip, declared.unwrap_or(configured_stream_port))
+}
+
 impl Admission {
-    /// Where to send this receiver's audio.
-    ///
-    /// The receiver's own port when it declared one, the configured stream
-    /// port otherwise. Never the control connection's source port, which is
-    /// an ephemeral port the OS picked and is not where anything is
-    /// listening.
+    /// Where to send this receiver's audio. See [`audio_destination`].
     #[must_use]
     pub fn audio_destination(&self, configured_stream_port: u16) -> SocketAddr {
-        let mut address = self.address;
-        address.set_port(self.audio_port.unwrap_or(configured_stream_port));
-        address
+        audio_destination(self.address.ip(), self.audio_port, configured_stream_port)
     }
 }
 

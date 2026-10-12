@@ -126,9 +126,26 @@ final class SlrStats extends Struct {
   @Uint64()
   external int rejected;
 
+  /// Encrypted packets this receiver had no key for.
+  ///
+  /// A few at the start of a stream are normal. A figure that keeps climbing
+  /// while nothing is heard is the one fault that looks like perfect health
+  /// from the desktop.
+  @Uint64()
+  external int keyless;
+
   /// Datagrams from an address other than the desktop we joined.
   @Uint64()
   external int foreign_datagrams;
+
+  /// Peak of the arriving mix, linear: 1.0 full scale, 0.0 digital silence.
+  ///
+  /// Must stay immediately before [buffer_ms], as in
+  /// `crates/receiver-ffi/src/types.rs`: the two pack into one eight-byte slot,
+  /// so swapping them would read the wrong field and the size assertion could
+  /// not tell.
+  @Float()
+  external double arrival_peak;
 
   /// Jitter-buffer depth, in milliseconds.
   @Float()
@@ -249,10 +266,10 @@ class StageLinkBindings {
 /// Checked at load, because a stale `.so` from a previous build would
 /// otherwise read the wrong bytes out of these structs and the symptom would
 /// be nonsense rather than an error.
-const int expectedAbiVersion = 1;
+const int expectedAbiVersion = 3;
 
 /// Size Rust pins for [SlrStats], from `crates/receiver-ffi/src/types.rs`.
 ///
 /// Asserted in the tests. This is the cheap half of what `ffigen` would have
 /// bought, and it catches the failure that actually matters.
-const int expectedStatsSize = 136;
+const int expectedStatsSize = 144;

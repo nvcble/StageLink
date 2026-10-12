@@ -8,12 +8,12 @@ someone's ears.
 
 | Layer | Count | Needs hardware? |
 | --- | --- | --- |
-| Rust unit and integration | 649 | Mostly no — see below |
+| Rust unit and integration | 652 | Mostly no — see below |
 | `@stagelink/shared-protocol` | 43 | No |
 | Electron / desktop | 62 | No |
 | Cross-implementation protocol | 22 | No (spawns the Rust probe) |
-| Flutter / mobile | 34 | No (18 drive the real native library) |
-| **Total automated** | **810** | |
+| Flutter / mobile | 39 | No (18 drive the real native library) |
+| **Total automated** | **818** | |
 | Desktop smoke test | 45 checks | Launches the real app |
 | Physical audio verification | manual | **Yes** |
 | Multi-receiver streaming | manual | **Yes, and Phases 3 + 5** |
@@ -210,7 +210,16 @@ node scripts/end-to-end.mjs                   # one receiver
 node scripts/end-to-end.mjs --receivers 3     # the multi-receiver claim
 node scripts/end-to-end.mjs --device "NUX"    # a named audio interface
 node scripts/end-to-end.mjs --seconds 60      # a longer soak
+node scripts/end-to-end.mjs --join-first      # join, *then* press Start
 ```
+
+**Run both orders.** `--join-first` is how a real service goes: performers join
+while the band is setting up and the operator presses Start afterwards. For a
+long time only the other order was tested, and it hid a defect that made the
+product useless in the field — a receiver that joined before the stream existed
+had no session id, so no audio key, so it refused every packet it was sent. The
+roster showed it connected, heartbeating and reporting healthy telemetry, and
+its wearer heard silence. See the verification note below.
 
 Every other test in this repository checks one side of a boundary. This one
 puts audio in at the desktop and takes a listenable WAV out at the receiver,
@@ -221,6 +230,25 @@ real jitter buffer.
 the roster, received packets with no loss, reported telemetry the desktop
 labelled `receiver-reported`, and wrote a WAV. The desktop reported its own
 send counters with no failures.
+
+**Verified, 2026-10-13, in the join-first order**, against both the debug and
+the release build, with one and with two receivers: a receiver joins, is told
+there is no stream and so holds no key, and when the operator presses Start it
+is told the session id, derives the key, and plays — 1 797 packets with zero
+loss in a twelve-second run. Three distinct defects had to be fixed to get
+there, all of which presented identically as "connected but silent":
+
+1. A receiver never installed a key for a session that started after it joined.
+2. The desktop enrolled already-joined receivers at the *configured* stream
+   port rather than the port each had declared.
+3. `stream.params` was broadcast after audio had already started flowing, so
+   the first packets could not be opened.
+
+Keyless packets are now counted as `keyless`, not `rejected`. They mean
+something entirely different — a malformed packet is noise on the port, and a
+keyless one is audio arriving that cannot be opened — and conflating them
+reported the symptom as "packets were rejected as malformed", which sends you
+looking in the wrong place.
 
 Two things to know:
 
@@ -262,6 +290,22 @@ asserts that the whole stack came up:
   falls back to *Electron's* version when a manifest has none, which looks
   entirely plausible on screen.
 
+Add to that list the one that bit hardest: **a window that loads but never
+renders.** `loadURL` resolving means the HTML arrived, not that anything
+painted, and the gap between those two has produced a black window three times
+in this project — a CSP blocking Nuxt's bootstrap, a protocol handler never
+registered, and a dev server answering `/` with the shell before Vite had
+compiled the client module graph. None of them logged anything. `loadRenderer`
+now checks for a rendered app, reloads once, and failing that writes a notice
+into the page; `scripts/renderer-console.mjs` prints the DOM probe that tells
+the two states apart.
+
+A note on the input check in that list: it asks the service what is selected
+and asserts the UI agrees, rather than assuming nothing is. A developer's
+machine usually has an interface configured and a fresh install does not, and
+an assertion that only holds for one of those fails forever on the other —
+which trains everyone to ignore it.
+
 It captures a PNG of the **application window** (via CDP, not a screen grab)
 into `tests/integration/artifacts/`.
 
@@ -291,7 +335,8 @@ Honest list, so nobody mistakes a green suite for a working monitor system:
 | Multiple concurrent receivers | **Verified.** Three at once, each with its own WAV and no loss |
 | Receiver pairing and authorisation | **Verified.** Join by QR, roster, heartbeats, telemetry, revocation |
 | Encrypted audio transport | **Verified** against a release build, which refuses to stream without it |
-| Audio reaches a **phone** | **Not verified.** The app has never run on a device |
+| A receiver that joined before Start is heard | **Verified.** `--join-first`, debug and release, one and two receivers |
+| Audio reaches a **phone** | **Not verified.** An APK now installs and opens, but no audio has come out of a device |
 | Android output latency | **Not verified.** Needs a phone; varies by an order of magnitude between devices |
 | Audio survives a locked screen | **Not verified.** The Wi-Fi lock and foreground service are written, not tested |
 | Recovery from a route change | **Not verified.** Earphones in or out, on real hardware |

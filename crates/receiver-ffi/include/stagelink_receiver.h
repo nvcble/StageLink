@@ -136,10 +136,18 @@ typedef struct {
   uint64_t reordered;
   /* Datagrams that were not valid StageLink packets. */
   uint64_t rejected;
+  /*
+   * Encrypted packets this receiver had no key for. A few at the start of a
+   * stream are normal; a figure that keeps climbing while nothing is heard is
+   * the one fault that looks like perfect health from the desktop.
+   */
+  uint64_t keyless;
   /* Datagrams from an address other than the desktop we joined. */
   uint64_t foreign_datagrams;
 
   /* Jitter-buffer depth, in milliseconds. */
+  /* Peak of the arriving mix, linear: 1.0 full scale, 0.0 silence. */
+  float arrival_peak;
   float buffer_ms;
   /*
    * Separate gaps concealed. More telling than a sample count: fifty short

@@ -19,6 +19,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../ffi/receiver.dart';
 import '../state/monitor_settings.dart';
 import '../state/session_controller.dart';
+import 'level_meter.dart';
 import 'theme.dart';
 import 'version_label.dart';
 
@@ -52,7 +53,12 @@ class MonitorScreen extends ConsumerWidget {
           child: Column(
             children: [
               _StatusBanner(session: session),
-              const SizedBox(height: 28),
+              const SizedBox(height: 16),
+              // Directly under the status line, because the two answer the
+              // same question at different resolutions: connected, and
+              // actually receiving sound.
+              LevelMeter(peak: session.stats.arrivalPeak),
+              const SizedBox(height: 24),
               Expanded(
                 child: _VolumeControl(
                   settings: session.settings,
@@ -419,6 +425,17 @@ class _DiagnosticsSheet extends ConsumerWidget {
           ),
           if (stats.rejected > 0)
             _Row('Unrecognised packets', '${stats.rejected}'),
+          // Shown separately from the above, because it means something
+          // completely different: the audio is arriving and cannot be opened.
+          // A few at the start of a stream are normal; a number that keeps
+          // climbing while there is nothing to hear is the fault to report,
+          // and it is invisible from the operator's end.
+          if (stats.keyless > 0)
+            _Row(
+              'Could not be unlocked',
+              '${stats.keyless}'
+                  '${stats.packetsReceived == 0 ? '  (report this)' : ''}',
+            ),
           if (stats.foreignDatagrams > 0)
             _Row('From another device', '${stats.foreignDatagrams}'),
           if (stats.clipped > 0)

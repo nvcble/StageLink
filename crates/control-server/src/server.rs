@@ -342,7 +342,7 @@ async fn serve<H: ControlHost>(
     };
 
     let receiver_id = admission.receiver_id.clone();
-    let (handle, mut outbound, displaced) = sessions.insert(&receiver_id, address);
+    let (handle, mut outbound, displaced) = sessions.insert(&receiver_id, address, admission.audio_port);
     if displaced.is_some() {
         debug!(receiver = %receiver_id, "replaced an earlier connection from the same device");
     }

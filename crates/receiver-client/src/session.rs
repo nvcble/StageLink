@@ -71,6 +71,10 @@ pub struct ReceiverSession {
     socket: AudioSocket,
     audio: AudioOutput,
     status: Arc<ControlStatus>,
+    /// The scanned join token, kept for as long as the session lasts because
+    /// every session's audio key is derived from it. Held in memory only —
+    /// never persisted, which is receiver obligation 9.
+    token: String,
     /// Sample rate the desktop told us, once it has.
     confirmed_sample_rate: Option<u32>,
     session_id: Option<u32>,
@@ -174,6 +178,7 @@ impl ReceiverSession {
             socket,
             audio,
             status,
+            token: payload.token.clone(),
             confirmed_sample_rate: session_id.map(|_| sample_rate),
             session_id,
         })
@@ -249,6 +254,11 @@ impl ReceiverSession {
             return;
         }
         self.confirmed_sample_rate = Some(params.sample_rate);
+        if self.session_id != Some(params.session_id) {
+            // A new session means a new key. This is the only path by which a
+            // receiver that joined before the stream started ever gets one.
+            self.socket.adopt_session(&self.token, params.session_id);
+        }
         self.session_id = Some(params.session_id);
     }
 
@@ -301,6 +311,7 @@ impl ReceiverSession {
             self.socket,
             self.audio,
             self.status,
+            self.token,
             self.confirmed_sample_rate,
             self.session_id,
         )

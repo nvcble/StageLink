@@ -10,6 +10,7 @@
  *   node scripts/end-to-end.mjs                  # one receiver, tone source
  *   node scripts/end-to-end.mjs --receivers 2    # prove multi-receiver
  *   node scripts/end-to-end.mjs --device "NUX"   # use a real audio interface
+ *   node scripts/end-to-end.mjs --join-first     # join, *then* press Start
  *
  * This is the test that cannot be faked. Every other test in the repository
  * checks one side of a boundary; this one puts audio in at the desktop and
@@ -304,22 +305,47 @@ async function main() {
     check('the join token is 256 bits of hex', /^[0-9a-f]{64}$/.test(String(code.token)))
     log(`join code valid for ${Math.round((code.expiresAt - code.issuedAt) / 1000)}s`)
 
-    // -- start streaming ---------------------------------------------------
-    const started = await client.invoke('stream.start')
-    check('the stream started', started.state === 'running', JSON.stringify(started))
-    check(
-      'the stream reports its real configuration',
-      started.config?.sampleRate > 0 && started.config?.payloadFormat === 'pcm_s16le',
-      JSON.stringify(started.config),
-    )
+    // -- start streaming, and the order it happens in ----------------------
+    //
+    // `--join-first` is the order a real service happens in: performers join
+    // while the band is still setting up, and the operator presses Start
+    // afterwards. It is worth its own mode because it exercises a different
+    // path — a receiver that joins before the stream exists has no session id,
+    // so it has no audio key until `stream.params` arrives and it adopts one.
+    // That was broken, and silently: the roster looked perfect and nobody
+    // heard a thing.
+    const joinFirst = process.argv.includes('--join-first')
+    const startStream = async () => {
+      const started = await client.invoke('stream.start')
+      check('the stream started', started.state === 'running', JSON.stringify(started))
+      check(
+        'the stream reports its real configuration',
+        started.config?.sampleRate > 0 && started.config?.payloadFormat === 'pcm_s16le',
+        JSON.stringify(started.config),
+      )
+    }
+
+    if (!joinFirst) await startStream()
 
     // -- run the receivers -------------------------------------------------
-    log(`running ${RECEIVERS} receiver(s) for ${SECONDS}s`)
-    const results = await Promise.all(
+    log(
+      `running ${RECEIVERS} receiver(s) for ${SECONDS}s` +
+        (joinFirst ? ', joining before the stream starts' : ''),
+    )
+    const running = Promise.all(
       Array.from({ length: RECEIVERS }, (_, index) =>
         runReceiver(index, code.qrPayload, SECONDS, signal !== null),
       ),
     )
+
+    if (joinFirst) {
+      // Long enough that every receiver has finished its handshake and been
+      // told there is no stream, which is the state that used to be fatal.
+      await delay(3_000)
+      await startStream()
+    }
+
+    const results = await running
 
     for (const result of results) {
       const name = `receiver ${result.index + 1}`

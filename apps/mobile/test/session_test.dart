@@ -90,6 +90,8 @@ void main() {
         duplicates: 0,
         reordered: 0,
         rejected: 0,
+        keyless: 0,
+        arrivalPeak: 0,
         foreignDatagrams: 0,
         bufferMs: 40,
         concealedRuns: 0,

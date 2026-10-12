@@ -212,16 +212,98 @@ export async function openExternalUrl(url: string): Promise<boolean> {
   return true
 }
 
-/** Loads the renderer: the dev server in development, the bundle in production. */
-export async function loadRenderer(window: BrowserWindow): Promise<void> {
-  if (isDevelopment()) {
-    logger.info(`loading the renderer from ${DEV_SERVER_URL}`)
-    await window.loadURL(DEV_SERVER_URL)
-    window.webContents.openDevTools({ mode: 'detach' })
+/** How long to give the app to render before treating the window as blank. */
+const FIRST_PAINT_MS = 10_000
+/** How long to give it after a recovery reload, which compiles nothing new. */
+const RELOAD_PAINT_MS = 20_000
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Whether the Vue app actually appeared in the DOM.
+ *
+ * Asked rather than awaited as an event, because there is no event for this: a
+ * failed dynamic import emits no `did-fail-load` and throws nothing the main
+ * process can see. The only reliable signal is the thing that matters — is
+ * there a rendered app?
+ */
+async function hasRendered(window: BrowserWindow): Promise<boolean> {
+  if (window.isDestroyed()) return false
+  const rendered = await window.webContents
+    .executeJavaScript(`!!document.getElementById('__nuxt')?.childElementCount`)
+    .catch(() => false)
+  return rendered === true
+}
+
+/**
+ * What to put on screen when the interface will not come up.
+ *
+ * Written into the empty document rather than loaded as a page, so it cannot
+ * itself fail on a navigation rule or the content security policy. Unstyled on
+ * purpose: the stylesheet is one of the things that may not have loaded.
+ */
+const MOUNT_FAILURE_NOTICE = [
+  '<h2>StageLink Core could not start its interface.</h2>',
+  '<p>The window loaded but the application never rendered. Nothing is streaming.</p>',
+  '<p>If this is a development build, the Nuxt dev server may still have been',
+  'compiling &mdash; close this window and reopen it.</p>',
+  '<p>The reason, if there was one, is in the log in the StageLink data folder.</p>',
+].join(' ')
+
+/**
+ * Recovers a window that loaded but never rendered anything.
+ *
+ * `loadURL` resolving means the HTML arrived — not that anything rendered, and
+ * the gap between those two is where every blank-window bug in this project has
+ * lived: a dev server answering `/` with the shell before Vite has compiled the
+ * client module graph, a content security policy blocking Nuxt's bootstrap
+ * script, a protocol handler that was never registered. All of them present
+ * identically, as black glass with nothing in any log.
+ *
+ * **Never awaited by startup.** What follows the load — spawning the audio
+ * service and the store load that depends on it — is timed against the page
+ * having loaded, not having painted, and making it wait on a watchdog delays
+ * the service handshake enough to fail it. This runs alongside instead.
+ *
+ * Stands down if anything navigated in the meantime: the operator reloading, or
+ * the renderer navigating itself, means something is alive and this must not
+ * reload a page out from under it.
+ */
+async function recoverIfBlank(window: BrowserWindow): Promise<void> {
+  let navigated = false
+  const onNavigate = () => {
+    navigated = true
+  }
+  window.webContents.on('did-start-navigation', onNavigate)
+
+  await delay(FIRST_PAINT_MS)
+  if (navigated || (await hasRendered(window))) {
+    if (!window.isDestroyed()) window.webContents.off('did-start-navigation', onNavigate)
     return
   }
-  logger.info(`loading the renderer from ${APP_ORIGIN}`)
-  await window.loadURL(`${APP_ORIGIN}/`)
+
+  logger.warn('the renderer loaded but never rendered; reloading once')
+  window.webContents.off('did-start-navigation', onNavigate)
+  window.webContents.reload()
+
+  await delay(RELOAD_PAINT_MS)
+  if (await hasRendered(window)) return
+
+  // Say so rather than leaving an operator looking at a black window and
+  // guessing, which is how a service starts ten minutes late.
+  logger.error('the renderer never rendered')
+  await window.webContents
+    .executeJavaScript(`document.body.innerHTML = ${JSON.stringify(MOUNT_FAILURE_NOTICE)}`)
+    .catch(() => undefined)
+}
+
+/** Loads the renderer: the dev server in development, the bundle in production. */
+export async function loadRenderer(window: BrowserWindow): Promise<void> {
+  const url = isDevelopment() ? DEV_SERVER_URL : `${APP_ORIGIN}/`
+  logger.info(`loading the renderer from ${url}`)
+  await window.loadURL(url)
+  if (isDevelopment()) window.webContents.openDevTools({ mode: 'detach' })
+  void recoverIfBlank(window)
 }
 
 /** Resolves the preload script path for the current build layout. */

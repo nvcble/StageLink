@@ -189,6 +189,11 @@ async fn main() -> Result<()> {
         duplicates = telemetry.duplicates,
         reordered = telemetry.reordered,
         rejected = telemetry.rejected,
+        keyless = telemetry.keyless,
+        // The same reading the mobile meter shows, from the same code. A
+        // figure here is the meter demonstrated against a real desktop rather
+        // than asserted in a unit test.
+        arrival_peak = format!("{:.4}", telemetry.arrival_peak),
         "packets"
     );
     info!(
@@ -237,13 +242,25 @@ fn assert_clean(
     );
     anyhow::ensure!(
         telemetry.packets_received > 0,
-        "{datagrams} datagrams arrived but none were valid StageLink packets"
+        "{datagrams} datagrams arrived but none were valid StageLink packets. \
+         {} of them were encrypted with a key this receiver never got",
+        telemetry.keyless
     );
     anyhow::ensure!(
         telemetry.rejected == 0,
         "{} packets were rejected as malformed",
         telemetry.rejected
     );
+    if telemetry.keyless > 0 {
+        // Not a failure in small numbers: the first packets of a stream can
+        // outrun the `stream.params` that carries the session id, and those
+        // cannot be opened. The assertion above is what catches a key that
+        // never arrived at all.
+        info!(
+            keyless = telemetry.keyless,
+            "packets arrived before the session key did"
+        );
+    }
     anyhow::ensure!(
         telemetry.clipped == 0,
         "the safety clip fired {} times, which means the limiter let something through",

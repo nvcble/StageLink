@@ -187,6 +187,25 @@ fn config_error(error: StreamConfigError) -> ServiceErrorPayload {
     payload
 }
 
+/// What a receiver needs to know about the stream it is about to be sent.
+///
+/// Two things reach a receiver nowhere else. The **sample rate**, because the
+/// packet header does not carry it and guessing wrong plays the mix sharp or
+/// flat in somebody's ears. And the **session id**, because the audio key is
+/// derived from it — a receiver without this cannot open a single packet.
+#[must_use]
+pub fn params(session_id: u32, config: &stream_server::StreamConfig) -> Value {
+    serde_json::json!({
+        "sessionId": session_id,
+        "sampleRate": config.sample_rate,
+        "frameDurationMs": config.frame_duration_ms,
+        "payloadFormat": "pcm_s16le",
+        "transport": config.transport.as_str(),
+        "streamPort": config.stream_port,
+        "framesPerPacket": config.frames_per_packet(),
+    })
+}
+
 /// Live stream status, as `streamStatusSchema`.
 ///
 /// Every counter here is **desktop-measured**: packets this machine handed to

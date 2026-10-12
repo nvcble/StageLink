@@ -133,7 +133,9 @@ class ReceiverStats {
     required this.duplicates,
     required this.reordered,
     required this.rejected,
+    required this.keyless,
     required this.foreignDatagrams,
+    required this.arrivalPeak,
     required this.bufferMs,
     required this.concealedRuns,
     required this.concealedMs,
@@ -155,7 +157,9 @@ class ReceiverStats {
         duplicates = 0,
         reordered = 0,
         rejected = 0,
+        keyless = 0,
         foreignDatagrams = 0,
+        arrivalPeak = 0,
         bufferMs = 0,
         concealedRuns = 0,
         concealedMs = 0,
@@ -182,7 +186,13 @@ class ReceiverStats {
   final int duplicates;
   final int reordered;
   final int rejected;
+  /// Encrypted packets with no key. Climbing while nothing is heard is the
+  /// one fault that looks healthy from the desktop.
+  final int keyless;
   final int foreignDatagrams;
+  /// Peak of the mix arriving from the desktop, linear, before this
+  /// performer gain and mute — so it reads even when they are muted.
+  final double arrivalPeak;
   final double bufferMs;
   final int concealedRuns;
   final double concealedMs;
@@ -373,7 +383,9 @@ class NativeReceiver {
         duplicates: raw.duplicates,
         reordered: raw.reordered,
         rejected: raw.rejected,
+        keyless: raw.keyless,
         foreignDatagrams: raw.foreign_datagrams,
+        arrivalPeak: raw.arrival_peak,
         bufferMs: raw.buffer_ms,
         concealedRuns: raw.concealed_runs,
         concealedMs: raw.concealed_ms,

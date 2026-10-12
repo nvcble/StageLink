@@ -562,14 +562,22 @@ impl StageLinkHandler {
         let stream_port = sender.config().stream_port;
 
         // Receivers that joined before the operator pressed Start — which is
-        // the normal case, since people connect their phones while the band is
-        // still setting up — are added now. Without this they would sit in the
-        // roster being sent nothing.
-        for entry in self.state.roster.lock().entries() {
-            if let Some(ip) = entry.ip_address.as_deref() {
-                if let Ok(address) = format!("{ip}:{stream_port}").parse() {
-                    sender.add_destination(&entry.receiver_id, address);
-                }
+        // the normal order, since people connect their phones while the band
+        // is still setting up — are enrolled now. Without this they sit in the
+        // roster being sent nothing at all.
+        //
+        // The order inside this block is load-bearing. Every receiver is told
+        // the session id *before* any audio is aimed at it, because the audio
+        // key is derived from that id: packets that arrive first cannot be
+        // opened and are discarded. Getting this backwards costs a few refused
+        // packets at the top of every stream, and told nothing at all it is
+        // the whole service.
+        let params = crate::stream_task::params(session_id, sender.config());
+        if let Some(server) = self.state.control_server.lock().as_ref() {
+            let sessions = server.sessions();
+            sessions.broadcast("stream.params", &params, now_ms());
+            for (receiver_id, address) in sessions.audio_destinations(stream_port) {
+                sender.add_destination(&receiver_id, address);
             }
         }
 
@@ -579,39 +587,9 @@ impl StageLinkHandler {
             started_at,
         });
 
-        // And they are told the audio parameters, because the sample rate
-        // reaches a receiver nowhere else and the one they were welcomed with
-        // was empty.
-        self.broadcast_stream_params();
-
         let status = self.stream_status();
         self.push_event("stream.status", status.clone());
         Ok(status)
-    }
-
-    /// Tells every connected receiver the current audio parameters.
-    ///
-    /// Sent on start and on any session change. A receiver must not infer the
-    /// sample rate from anything else — the packet header does not carry it,
-    /// and guessing wrong plays the mix sharp or flat in somebody's ears.
-    fn broadcast_stream_params(&self) {
-        let params = {
-            let active = self.state.sender.lock();
-            let Some(active) = active.as_ref() else { return };
-            let config = active.sender.config();
-            json!({
-                "sessionId": active.session_id,
-                "sampleRate": config.sample_rate,
-                "frameDurationMs": config.frame_duration_ms,
-                "payloadFormat": "pcm_s16le",
-                "transport": config.transport.as_str(),
-                "streamPort": config.stream_port,
-                "framesPerPacket": config.frames_per_packet(),
-            })
-        };
-        if let Some(server) = self.state.control_server.lock().as_ref() {
-            server.sessions().broadcast("stream.params", &params, now_ms());
-        }
     }
 
     /// Stops sending audio.

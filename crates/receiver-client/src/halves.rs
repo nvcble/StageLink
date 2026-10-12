@@ -20,44 +20,37 @@
 
 use std::sync::Arc;
 
-use parking_lot::Mutex;
 use receiver_core::dsp::MonitorSettings;
 use receiver_core::receiver::{AudioOutput, Preset, Telemetry, TelemetryHandle};
 
 use crate::audio::{AudioSocket, SocketStats};
 use crate::control::{ControlClient, ControlEvent, ControlStatus, TelemetryReport};
+use crate::latest::Latest;
 
 /// Settings waiting to be applied by the render half.
 ///
-/// Only the latest matters: a performer dragging a volume fader produces
-/// dozens of changes a second and only the one they stopped at is interesting,
-/// so this overwrites rather than queueing.
+/// Two [`Latest`] slots, because the render half must never wait on the app
+/// thread; see that module for why only the newest value matters.
 #[derive(Default)]
 pub struct SettingsInbox {
-    monitor: Mutex<Option<MonitorSettings>>,
-    preset: Mutex<Option<Preset>>,
+    monitor: Latest<MonitorSettings>,
+    preset: Latest<Preset>,
 }
 
 impl SettingsInbox {
     /// Posts new settings. Called from the app thread.
     pub fn post(&self, settings: MonitorSettings) {
-        *self.monitor.lock() = Some(settings);
+        self.monitor.post(settings);
     }
 
     /// Posts a new buffer preset.
     pub fn post_preset(&self, preset: Preset) {
-        *self.preset.lock() = Some(preset);
+        self.preset.post(preset);
     }
 
     /// Takes whatever is pending, without ever waiting.
-    ///
-    /// `try_lock` rather than `lock`: this runs on the audio thread, and the
-    /// one thing it must never do is block. A missed poll costs one block of
-    /// delay in applying a change.
     fn take(&self) -> (Option<MonitorSettings>, Option<Preset>) {
-        let monitor = self.monitor.try_lock().and_then(|mut slot| slot.take());
-        let preset = self.preset.try_lock().and_then(|mut slot| slot.take());
-        (monitor, preset)
+        (self.monitor.take(), self.preset.take())
     }
 }
 
@@ -131,6 +124,10 @@ pub struct SessionControl {
     telemetry: TelemetryHandle,
     settings: Arc<SettingsInbox>,
     status: Arc<ControlStatus>,
+    /// The scanned join token. Every session's audio key is derived from it,
+    /// so it is held for the life of the session — in memory only, never
+    /// persisted, which is receiver obligation 9.
+    token: String,
     confirmed_sample_rate: Option<u32>,
     session_id: Option<u32>,
 }
@@ -157,6 +154,14 @@ impl SessionControl {
         while let Some(event) = self.control.try_next_event() {
             if let ControlEvent::StreamParams(params) = &event {
                 self.confirmed_sample_rate = Some(params.sample_rate);
+                if self.session_id != Some(params.session_id) {
+                    // A new session means a new key, and this is the only path
+                    // by which a receiver that joined before the operator
+                    // pressed Start ever gets one. Without it every packet is
+                    // refused and the performer hears nothing, while the
+                    // roster shows them connected and healthy.
+                    self.socket.adopt_session(&self.token, params.session_id);
+                }
                 self.session_id = Some(params.session_id);
             }
             events.push(event);
@@ -225,6 +230,7 @@ pub(crate) fn split(
     socket: AudioSocket,
     audio: AudioOutput,
     status: Arc<ControlStatus>,
+    token: String,
     confirmed_sample_rate: Option<u32>,
     session_id: Option<u32>,
 ) -> (SessionControl, SessionRender) {
@@ -237,6 +243,7 @@ pub(crate) fn split(
             telemetry,
             settings: Arc::clone(&settings),
             status,
+            token,
             confirmed_sample_rate,
             session_id,
         },
@@ -288,7 +295,7 @@ mod tests {
             ..MonitorSettings::default()
         });
 
-        let held = inbox.monitor.lock();
+        let held = inbox.monitor.0.lock();
         let (monitor, _) = inbox.take();
         assert!(monitor.is_none(), "it should have given up rather than waited");
         drop(held);

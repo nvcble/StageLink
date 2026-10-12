@@ -328,9 +328,21 @@ async function main() {
       'the dashboard reports that it is not streaming',
       String(bodyText).includes('Not streaming'),
     )
+    // Asked of the service rather than assumed, because this depends on the
+    // profile the app was started with. A developer's machine usually has an
+    // interface selected and a fresh install does not, and an assertion that
+    // only holds for one of those fails forever on the other — which trains
+    // everyone to ignore it.
+    const audioStatus = JSON.parse(
+      String(await cdp.evaluate('JSON.stringify(await window.stagelink.invoke("audio.getStatus"))')),
+    )
+    const hasInput = audioStatus?.device != null
     check(
-      'an unselected input is reported as such rather than shown as a level',
-      String(bodyText).includes('No audio input selected'),
+      hasInput
+        ? 'a selected input is shown as a level, not as "none selected"'
+        : 'an unselected input is reported as such rather than shown as a level',
+      String(bodyText).includes('No audio input selected') === !hasInput,
+      `service device=${JSON.stringify(audioStatus?.device ?? null)}`,
     )
 
     // -- the join QR renders locally --------------------------------------

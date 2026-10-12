@@ -22,7 +22,11 @@ const OUTBOUND_QUEUE: usize = 32;
 /// One connected receiver, from the desktop's side.
 pub struct SessionHandle {
     pub receiver_id: String,
+    /// Where the control connection came from. Its port is the OS-chosen
+    /// source port of a TCP connection, never where audio should be sent.
     pub address: SocketAddr,
+    /// The UDP port this receiver declared it is listening on, if it did.
+    pub audio_port: Option<u16>,
     outbound: mpsc::Sender<Envelope>,
 }
 
@@ -75,11 +79,13 @@ impl ReceiverSessions {
         &self,
         receiver_id: &str,
         address: SocketAddr,
+        audio_port: Option<u16>,
     ) -> (Arc<SessionHandle>, mpsc::Receiver<Envelope>, Option<Arc<SessionHandle>>) {
         let (sender, receiver) = mpsc::channel(OUTBOUND_QUEUE);
         let handle = Arc::new(SessionHandle {
             receiver_id: receiver_id.to_owned(),
             address,
+            audio_port,
             outbound: sender,
         });
         let displaced = self
@@ -117,6 +123,31 @@ impl ReceiverSessions {
         self.inner.lock().len()
     }
 
+    /// Every connected receiver, and where its audio has to be sent.
+    ///
+    /// This is what the sender needs when the operator presses Start with
+    /// phones already joined — which is the normal order, since people connect
+    /// while the band is still setting up. Taken from the live connections
+    /// rather than the roster: the roster also holds devices that have gone,
+    /// and it does not record the port each one declared.
+    #[must_use]
+    pub fn audio_destinations(&self, configured_stream_port: u16) -> Vec<(String, SocketAddr)> {
+        self.inner
+            .lock()
+            .values()
+            .map(|handle| {
+                (
+                    handle.receiver_id.clone(),
+                    crate::join::audio_destination(
+                        handle.address.ip(),
+                        handle.audio_port,
+                        configured_stream_port,
+                    ),
+                )
+            })
+            .collect()
+    }
+
     #[must_use]
     pub fn ids(&self) -> Vec<String> {
         let mut ids: Vec<String> = self.inner.lock().keys().cloned().collect();
@@ -144,7 +175,7 @@ mod tests {
     #[test]
     fn a_registered_session_can_be_found_and_removed() {
         let sessions = ReceiverSessions::new();
-        let (handle, _rx, displaced) = sessions.insert("r1", address());
+        let (handle, _rx, displaced) = sessions.insert("r1", address(), None);
         assert!(displaced.is_none());
         assert_eq!(sessions.count(), 1);
         assert!(sessions.get("r1").is_some());
@@ -159,8 +190,8 @@ mod tests {
     #[test]
     fn a_reconnect_displaces_the_previous_session_rather_than_being_refused() {
         let sessions = ReceiverSessions::new();
-        let (first, _rx1, _) = sessions.insert("r1", address());
-        let (second, _rx2, displaced) = sessions.insert("r1", "10.0.0.6:52000".parse().unwrap());
+        let (first, _rx1, _) = sessions.insert("r1", address(), None);
+        let (second, _rx2, displaced) = sessions.insert("r1", "10.0.0.6:52000".parse().unwrap(), None);
 
         assert!(displaced.is_some(), "the old session should be handed back");
         assert_eq!(sessions.count(), 1, "not two sessions for one device");
@@ -174,8 +205,8 @@ mod tests {
     #[test]
     fn a_displaced_session_cleaning_up_does_not_remove_the_live_one() {
         let sessions = ReceiverSessions::new();
-        let (first, _rx1, _) = sessions.insert("r1", address());
-        let (_second, _rx2, _) = sessions.insert("r1", "10.0.0.6:52000".parse().unwrap());
+        let (first, _rx1, _) = sessions.insert("r1", address(), None);
+        let (_second, _rx2, _) = sessions.insert("r1", "10.0.0.6:52000".parse().unwrap(), None);
 
         // The old connection finally notices and cleans up.
         sessions.remove_if_current(&first);
@@ -190,7 +221,7 @@ mod tests {
     #[tokio::test]
     async fn an_event_reaches_the_receiver() {
         let sessions = ReceiverSessions::new();
-        let (_handle, mut rx, _) = sessions.insert("r1", address());
+        let (_handle, mut rx, _) = sessions.insert("r1", address(), None);
 
         sessions.broadcast("receivers.changed", &serde_json::json!({ "x": 1 }), 7);
         let envelope = rx.recv().await.expect("the event must arrive");
@@ -208,7 +239,7 @@ mod tests {
     #[tokio::test]
     async fn a_full_queue_drops_rather_than_blocking() {
         let sessions = ReceiverSessions::new();
-        let (handle, _rx, _) = sessions.insert("r1", address());
+        let (handle, _rx, _) = sessions.insert("r1", address(), None);
 
         let mut sent = 0;
         for index in 0..OUTBOUND_QUEUE * 4 {
@@ -222,7 +253,7 @@ mod tests {
     #[tokio::test]
     async fn sending_to_a_departed_receiver_is_not_an_error() {
         let sessions = ReceiverSessions::new();
-        let (handle, rx, _) = sessions.insert("r1", address());
+        let (handle, rx, _) = sessions.insert("r1", address(), None);
         drop(rx);
         assert!(!handle.send_event("stream.status", Value::Null, 0));
     }
@@ -231,7 +262,7 @@ mod tests {
     fn ids_are_sorted_so_the_roster_does_not_reshuffle() {
         let sessions = ReceiverSessions::new();
         for id in ["r3", "r1", "r2"] {
-            let (_h, _rx, _) = sessions.insert(id, address());
+            let (_h, _rx, _) = sessions.insert(id, address(), None);
             // Leak the handles deliberately: dropping them would not
             // unregister, but keeping them is what a live server does.
             core::mem::forget(_h);

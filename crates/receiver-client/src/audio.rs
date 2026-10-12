@@ -53,6 +53,9 @@ impl SocketStats {
 pub struct AudioSocket {
     stats: Arc<SocketStats>,
     stop: Arc<AtomicBool>,
+    /// A key for a session that started after this socket did; see
+    /// [`AudioSocket::adopt_session`].
+    key: Arc<crate::latest::Latest<audio_protocol::SessionKey>>,
     thread: Option<JoinHandle<()>>,
     local_address: std::net::SocketAddr,
 }
@@ -124,10 +127,12 @@ impl AudioSocket {
 
         let stats = Arc::new(SocketStats::default());
         let stop = Arc::new(AtomicBool::new(false));
+        let key = Arc::new(crate::latest::Latest::default());
 
         let thread = {
             let stats = Arc::clone(&stats);
             let stop = Arc::clone(&stop);
+            let key = Arc::clone(&key);
             std::thread::Builder::new()
                 .name("stagelink-receive".to_owned())
                 .spawn(move || {
@@ -135,6 +140,15 @@ impl AudioSocket {
                     // datagram the protocol says cannot exist.
                     let mut buffer = vec![0_u8; 1_500];
                     while !stop.load(Ordering::Acquire) {
+                        // Checked every iteration, so a stream the operator
+                        // starts after this receiver joined is picked up
+                        // within one read timeout and immediately on the next
+                        // datagram once audio is flowing.
+                        if let Some(key) = key.take() {
+                            info!("adopting the key for a newly started session");
+                            input.set_session_key(key);
+                        }
+
                         match socket.recv_from(&mut buffer) {
                             Ok((len, from)) => {
                                 stats.datagrams.fetch_add(1, Ordering::Relaxed);
@@ -176,9 +190,26 @@ impl AudioSocket {
         Ok(Self {
             stats,
             stop,
+            key,
             thread: Some(thread),
             local_address,
         })
+    }
+
+    /// Derives and installs the key for `session_id`.
+    ///
+    /// Called whenever `stream.params` says the desktop is on a new session —
+    /// including the first one, when a performer joined while the band was
+    /// still setting up and the operator had not pressed Start yet.
+    ///
+    /// Without this a receiver keeps whatever key it had at join time, which
+    /// for a receiver that joined before the stream existed is *no key at
+    /// all*: every packet comes back `Accepted::Encrypted` and is refused, so
+    /// the performer hears silence while the operator's roster shows them
+    /// connected, heartbeating and reporting healthy telemetry.
+    pub fn adopt_session(&self, token: &str, session_id: u32) {
+        self.key
+            .post(audio_protocol::SessionKey::derive(token, session_id));
     }
 
     #[must_use]
@@ -239,6 +270,30 @@ mod tests {
         datagram
     }
 
+    /// The same packet, on the encrypted transport a release build insists on.
+    fn sealed(
+        key: &audio_protocol::SessionKey,
+        session_id: u32,
+        sequence: u32,
+        value: f32,
+    ) -> Vec<u8> {
+        let payload_len = FRAMES * 2;
+        let mut datagram =
+            vec![0_u8; HEADER_BYTES + payload_len + audio_protocol::AEAD_TAG_BYTES];
+        let header = AudioPacketHeader::new(
+            session_id,
+            sequence,
+            u64::from(sequence) * 5_000,
+            PacketFlags::empty().with(PacketFlags::ENCRYPTED),
+        );
+        encode_header(&header, &mut datagram).unwrap();
+        let samples = vec![value; FRAMES];
+        audio_core::convert::f32_to_pcm_s16le(&samples, &mut datagram[HEADER_BYTES..]);
+        let total = key.seal(&mut datagram, payload_len, sequence).unwrap();
+        datagram.truncate(total);
+        datagram
+    }
+
     #[test]
     fn the_monotonic_clock_only_moves_forward() {
         let first = now_us();
@@ -270,6 +325,68 @@ mod tests {
         assert!(socket.stats().datagrams() >= 35, "{}", socket.stats().datagrams());
         assert!(peak > 0.4, "the audio did not come through: peak {peak}");
         assert_eq!(audio.telemetry().packets_lost, 0);
+
+        // The reading the mobile meter is built on, measured here through the
+        // real socket and the real parse rather than from a hand-made packet.
+        let arriving = audio.telemetry().arrival_peak;
+        assert!(
+            (arriving - 0.5).abs() < 0.05,
+            "the arrival meter should read the 0.5 that was sent, got {arriving}"
+        );
+        socket.stop();
+    }
+
+    /// The order a service actually happens in: performers join while the band
+    /// is setting up, and the operator presses Start afterwards.
+    ///
+    /// A receiver that joined first has no session id and therefore no key, so
+    /// every packet of the stream that follows is refused. The only thing that
+    /// rescues it is adopting the key when `stream.params` arrives — and
+    /// nothing did, which is why a phone could sit in the roster reporting
+    /// healthy telemetry while its wearer heard silence.
+    #[test]
+    fn a_stream_started_after_joining_is_heard_once_its_key_is_adopted() {
+        const TOKEN: &str = "a9f1c3d5e7b90213456789abcdef0123456789abcdef0123456789abcdef0123";
+        const SESSION: u32 = 0x5EED;
+
+        // No key, exactly as a receiver that joined before Start was pressed.
+        let (net, mut audio) =
+            receiver_core::receiver::new(ReceiverConfig::new(48_000, FRAMES));
+        let mut socket = AudioSocket::start("127.0.0.1:0", None, net).unwrap();
+        let address = socket.local_address();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+
+        let key = audio_protocol::SessionKey::derive(TOKEN, SESSION);
+        let render = |audio: &mut receiver_core::receiver::AudioOutput| {
+            let mut block = vec![0.0_f32; FRAMES];
+            let mut peak = 0.0_f32;
+            for _ in 0..30 {
+                audio.render(&mut block);
+                peak = peak.max(block.iter().fold(0.0_f32, |acc, &s| acc.max(s.abs())));
+            }
+            peak
+        };
+
+        for sequence in 0..40 {
+            sender.send_to(&sealed(&key, SESSION, sequence, 0.5), address).unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(
+            render(&mut audio),
+            0.0,
+            "a receiver with no key must refuse sealed audio, not play it as noise"
+        );
+
+        // `stream.params` arrives; both poll paths now call this.
+        socket.adopt_session(TOKEN, SESSION);
+
+        for sequence in 40..80 {
+            sender.send_to(&sealed(&key, SESSION, sequence, 0.5), address).unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let peak = render(&mut audio);
+        assert!(peak > 0.4, "the stream was still not heard after the key arrived: peak {peak}");
+
         socket.stop();
     }
 

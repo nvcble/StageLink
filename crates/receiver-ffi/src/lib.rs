@@ -53,7 +53,7 @@ pub use types::{SlrConfig, SlrEq, SlrStats};
 /// The app checks this at load. A mismatched `.so` left over from a previous
 /// build would otherwise read the wrong bytes out of these structs, and the
 /// symptom would be nonsense rather than an error.
-pub const SLR_ABI_VERSION: u32 = 1;
+pub const SLR_ABI_VERSION: u32 = 3;
 
 /// An opaque receiver handle.
 ///

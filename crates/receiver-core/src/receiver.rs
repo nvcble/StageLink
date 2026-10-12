@@ -146,9 +146,23 @@ pub struct Telemetry {
     pub duplicates: u64,
     pub reordered: u64,
     pub rejected: u64,
+    /// Encrypted packets this receiver had no key for.
+    ///
+    /// Deliberately **not** counted as `rejected`: a malformed packet is noise
+    /// on the port, and this is a stream we cannot open. A handful at the very
+    /// start is normal, because the first packets can outrun the
+    /// `stream.params` carrying the session id — but a figure that keeps
+    /// climbing means the key never arrived and the performer hears nothing.
+    pub keyless: u64,
     /// Packets that failed authentication. Non-zero means either a key
     /// mismatch or somebody on the network injecting packets.
     pub unauthentic: u64,
+    /// Absolute peak of the arriving mix, linear, where 1.0 is full scale and
+    /// 0.0 is digital silence.
+    ///
+    /// Linear rather than decibels so it crosses a C ABI without needing a
+    /// sentinel for silence, which in dB is negative infinity.
+    pub arrival_peak: f32,
     /// Playable depth, in milliseconds.
     pub buffer_health_ms: f64,
     /// Times the buffer had nothing to play and concealment ran.
@@ -178,8 +192,24 @@ pub struct Telemetry {
 }
 
 /// State shared by the two halves. Atomics only; no locks.
+/// Release applied to the arrival meter between packets.
+///
+/// At 200 packets a second, a bare per-packet peak sampled by the app at 10 Hz
+/// would show whichever five milliseconds happened to land last: it flickers
+/// and it under-reads. This falls about 20 dB per second, which looks like a
+/// meter — and because it only ever decays *between* packets, it can never
+/// report more signal than actually arrived.
+const ARRIVAL_METER_RELEASE: f32 = 0.9886;
+
 struct Shared {
     buffer: JitterBuffer,
+    /// Absolute peak of the audio arriving from the desktop, as `f32` bits.
+    ///
+    /// Measured on the network thread, before the performer's gain, mute and
+    /// EQ, so a meter built on it answers "is the mix reaching this phone?"
+    /// rather than "is this phone making a noise" — the two differ precisely
+    /// when somebody has muted themselves and wants to know why it is quiet.
+    arrival_peak_bits: AtomicU32,
     /// Sequence the audio callback will play next. Read by the network thread
     /// so it never overwrites audio that is still needed.
     read_sequence: AtomicU32,
@@ -195,6 +225,7 @@ struct Shared {
     duplicates: AtomicU64,
     reordered: AtomicU64,
     rejected: AtomicU64,
+    keyless: AtomicU64,
     unauthentic: AtomicU64,
 
     // Audio-side counters.
@@ -234,10 +265,25 @@ impl TelemetryHandle {
 /// Returned as a pair rather than as one object with two sets of methods,
 /// because the two halves are used from different threads and the type system
 /// should say so.
+impl Shared {
+    /// Folds one arrived packet into the arrival meter.
+    ///
+    /// Pure arithmetic in registers plus two relaxed atomics, regardless of
+    /// packet size — the network thread has a deadline too.
+    fn meter_arrival(&self, samples: &[f32]) {
+        let peak = samples.iter().fold(0.0_f32, |acc, &sample| acc.max(sample.abs()));
+        let previous = f32::from_bits(self.arrival_peak_bits.load(Ordering::Relaxed));
+        let decayed = previous * ARRIVAL_METER_RELEASE;
+        self.arrival_peak_bits
+            .store(peak.max(decayed).to_bits(), Ordering::Relaxed);
+    }
+}
+
 #[must_use]
 pub fn new(config: ReceiverConfig) -> (NetworkInput, AudioOutput) {
     let shared = Arc::new(Shared {
         buffer: JitterBuffer::new(config.frames_per_packet),
+        arrival_peak_bits: AtomicU32::new(0),
         read_sequence: AtomicU32::new(0),
         start_sequence: AtomicU32::new(0),
         stream_epoch: AtomicU32::new(0),
@@ -247,6 +293,7 @@ pub fn new(config: ReceiverConfig) -> (NetworkInput, AudioOutput) {
         duplicates: AtomicU64::new(0),
         reordered: AtomicU64::new(0),
         rejected: AtomicU64::new(0),
+        keyless: AtomicU64::new(0),
         unauthentic: AtomicU64::new(0),
         concealed_runs: AtomicU64::new(0),
         concealed_samples: AtomicU64::new(0),
@@ -311,7 +358,7 @@ impl NetworkInput {
             let Some(key) = &self.key else {
                 // Honest refusal rather than playing ciphertext as audio,
                 // which would be loud noise straight into somebody's ears.
-                self.shared.rejected.fetch_add(1, Ordering::Relaxed);
+                self.shared.keyless.fetch_add(1, Ordering::Relaxed);
                 return Accepted::Encrypted;
             };
             if payload.len() > self.ciphertext.len() {
@@ -373,6 +420,7 @@ impl NetworkInput {
         }
 
         audio_core::convert::pcm_s16le_to_f32(payload, &mut self.samples);
+        self.shared.meter_arrival(&self.samples);
 
         let reader_at = self.shared.read_sequence.load(Ordering::Relaxed);
         let outcome = self.shared.buffer.insert(
@@ -806,7 +854,9 @@ fn telemetry(shared: &Shared, config: ReceiverConfig) -> Telemetry {
         duplicates: shared.duplicates.load(Ordering::Relaxed),
         reordered: shared.reordered.load(Ordering::Relaxed),
         rejected: shared.rejected.load(Ordering::Relaxed),
+        keyless: shared.keyless.load(Ordering::Relaxed),
         unauthentic: shared.unauthentic.load(Ordering::Relaxed),
+        arrival_peak: f32::from_bits(shared.arrival_peak_bits.load(Ordering::Relaxed)),
         buffer_health_ms: frames as f64 * 1_000.0 / rate,
         concealed_runs: shared.concealed_runs.load(Ordering::Relaxed),
         concealed_ms: concealed as f64 * 1_000.0 / rate,
@@ -850,6 +900,53 @@ mod tests {
         let samples = vec![value; FRAMES];
         audio_core::convert::f32_to_pcm_s16le(&samples, &mut datagram[HEADER_BYTES..]);
         datagram
+    }
+
+    /// The meter reads the mix as it *arrives*, not as the performer hears it.
+    ///
+    /// That distinction is the whole point: muted, or with the volume at the
+    /// bottom, somebody needs to be able to see that the desktop is still
+    /// sending them audio.
+    #[test]
+    fn the_arrival_meter_follows_the_incoming_signal_not_the_output() {
+        let (mut net, mut audio) = new(config());
+        audio.apply_settings(MonitorSettings { muted: true, ..MonitorSettings::default() });
+
+        assert_eq!(net.telemetry().arrival_peak, 0.0, "silence before anything arrives");
+
+        for sequence in 0..20 {
+            net.accept(&packet(SESSION, sequence, 0.5, 0), 0);
+        }
+        let arriving = net.telemetry().arrival_peak;
+        assert!(
+            (arriving - 0.5).abs() < 0.01,
+            "the meter should read the arriving 0.5, got {arriving}"
+        );
+
+        // Muted, so nothing is coming out — and the meter still reads the feed.
+        let mut block = vec![0.0_f32; FRAMES];
+        for _ in 0..20 {
+            audio.render(&mut block);
+        }
+        assert_eq!(peak(&block), 0.0, "muted output must be silent");
+        assert!(net.telemetry().arrival_peak > 0.4, "the meter must not follow the output");
+    }
+
+    /// It has to fall when the mix stops, or it reads like a stuck needle.
+    #[test]
+    fn the_arrival_meter_releases_when_the_mix_goes_quiet() {
+        let (mut net, _audio) = new(config());
+        for sequence in 0..20 {
+            net.accept(&packet(SESSION, sequence, 0.9, 0), 0);
+        }
+        let loud = net.telemetry().arrival_peak;
+
+        // A second of digital silence, at 200 packets per second.
+        for sequence in 20..220 {
+            net.accept(&packet(SESSION, sequence, 0.0, 0), 0);
+        }
+        let quiet = net.telemetry().arrival_peak;
+        assert!(quiet < loud * 0.2, "expected a clear fall from {loud}, got {quiet}");
     }
 
     fn peak(samples: &[f32]) -> f32 {
