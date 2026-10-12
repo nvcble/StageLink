@@ -1,0 +1,24 @@
+[package]
+name = "reference-transmitter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Sends real StageLink audio packets, with reproducible network impairments, so receivers can be developed and verified without a mixer."
+
+[[bin]]
+name = "stagelink-reference-transmitter"
+path = "src/main.rs"
+
+[dependencies]
+audio-core = { workspace = true }
+audio-protocol = { workspace = true }
+stream-server = { workspace = true }
+
+anyhow = { workspace = true }
+clap = { workspace = true }
+hound = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

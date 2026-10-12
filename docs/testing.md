@@ -8,11 +8,11 @@ someone's ears.
 
 | Layer | Count | Needs hardware? |
 | --- | --- | --- |
-| Rust unit and integration | 352 | Mostly no — see below |
+| Rust unit and integration | 387 | Mostly no — see below |
 | `@stagelink/shared-protocol` | 43 | No |
 | Electron / desktop | 62 | No |
 | Cross-implementation protocol | 22 | No (spawns the Rust probe) |
-| **Total automated** | **479** | |
+| **Total automated** | **514** | |
 | Desktop smoke test | 44 checks | Launches the real app |
 | Physical audio verification | manual | **Yes** |
 | Multi-receiver streaming | manual | **Yes, and Phases 3 + 5** |
@@ -108,6 +108,53 @@ cargo run -p test-receiver --bin stagelink-test-receiver -- \
 Drives 100 synthetic packets — one deliberately dropped — through the real
 receive path, asserting sequencing, loss accounting and PCM round-trip accuracy,
 and writing a WAV you can listen to.
+
+## The audio protocol, over a real socket
+
+`reference-transmitter` sends **real** StageLink packets, with reproducible
+network impairments, so a receiver can be developed and verified before the
+desktop can send anything and before there is a phone to receive it. It is a
+permanent fixture, not scaffolding: it is how the mobile audio path gets tested
+without a mixer in the room.
+
+```bash
+# Receiver first — it binds; audio is pushed to it
+cargo run -p test-receiver --bin stagelink-test-receiver -- \
+  --listen 127.0.0.1:45872 --duration-secs 15 --output ./received.wav
+
+# A clean five seconds of 1 kHz
+cargo run -p reference-transmitter --bin stagelink-reference-transmitter -- \
+  --target 127.0.0.1:45872 --duration-secs 5
+
+# The Wi-Fi case: 2% loss in bursts of eight, with jitter and duplicates
+cargo run -p reference-transmitter --bin stagelink-reference-transmitter -- \
+  --target 127.0.0.1:45872 --duration-secs 5 \
+  --loss 2 --burst-length 8 --reorder 1 --duplicate 1 --jitter-ms 10 --seed 1234
+
+# Somebody walks in front of the access point, and the clock drifts
+cargo run -p reference-transmitter --bin stagelink-reference-transmitter -- \
+  --target 127.0.0.1:45872 --duration-secs 6 \
+  --outage-ms 1000 --outage-period-ms 3000 --clock-ppm 40
+```
+
+Every random decision comes from `--seed`, so a receiver bug found at 2% loss
+replays exactly. Impairments are opt-in; with no flags it is a plain sender.
+
+**Verified** (see the log lines each run prints): on the impaired run above the
+receiver's independently derived figures matched the transmitter's exactly —
+120 lost, 8 duplicates, 8 reordered — which is receiver obligation 2 in
+[`protocol/pairing.md`](protocol/pairing.md) demonstrated rather than asserted.
+A `--session-change-after` run produced exactly the audio after the change,
+proving obligation 3. The end-of-stream marker stopped the receiver cleanly,
+which is the fix for defect D1 shown on the wire.
+
+Two things to know when comparing the two reports:
+
+- Use the transmitter's `realised_loss_percent`, not the configured rate. Short
+  runs do not land on their nominal loss.
+- A receiver cannot count losses before the first packet it ever sees. Start a
+  run inside an outage and the transmitter will say it dropped 400 while the
+  receiver honestly says it lost 201. That is not a receiver bug.
 
 ## The desktop smoke test
 

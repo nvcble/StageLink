@@ -777,6 +777,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "reference-transmitter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "audio-core",
+ "audio-protocol",
+ "clap",
+ "hound",
+ "rand",
+ "stream-server",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "regex-automata"
 version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"

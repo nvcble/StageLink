@@ -12,6 +12,7 @@ members = [
     "desktop-ipc",
     "stagelink-service",
     "test-receiver",
+    "reference-transmitter",
 ]
 
 [workspace.package]
@@ -33,6 +34,7 @@ device-discovery = { path = "device-discovery" }
 telemetry = { path = "telemetry" }
 persistence = { path = "persistence" }
 desktop-ipc = { path = "desktop-ipc" }
+reference-transmitter = { path = "reference-transmitter" }
 
 # Async runtime. `net` brings in the Windows named-pipe types used by desktop-ipc.
 tokio = { version = "1.53", features = [

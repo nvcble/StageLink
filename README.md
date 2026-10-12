@@ -49,7 +49,11 @@ FOH mixer ─ AUX send ─ USB interface ─ Windows desktop ─ Ethernet ─ Wi
 Stated plainly, because a monitor system you cannot trust is worse than none:
 
 - **Audio does not reach phones yet.** The packet format, packetiser and
-  per-receiver queues are built and tested; the UDP sender is Phase 3.
+  per-receiver queues are built and tested; the UDP sender is Phase 3. Real
+  StageLink packets *do* now travel over a real socket between
+  `reference-transmitter` and `test-receiver` — see
+  [docs/testing.md](docs/testing.md) — which is how the receiver is being built
+  ahead of the sender, but no audio leaves the desktop application.
 - **Receivers cannot connect yet.** The join QR is real and final, but the
   control server that honours it is Phase 5.
 - **The encrypted transport is not implemented.** Phase 5. The plaintext

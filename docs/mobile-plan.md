@@ -295,7 +295,7 @@ Ordered so that everything hard is proven **before** any hardware is required.
 | # | Milestone | Needs |
 | --- | --- | --- |
 | **M0** | Spec fixes and shipped-defect fixes (D1–D6, contradictions), each with a failing test first. **Protocol work complete**; D3's fix waits on M6, and the UDP sender, control server and reference transmitter are M1/M6/M7 | — |
-| **M1** | `crates/reference-transmitter` — WAV/tone replay with injectable loss, bursts, reorder, duplicates, outages, `sessionId` change, `--clock-ppm`, `--seed` | — |
+| **M1** | `crates/reference-transmitter` — WAV/tone replay with injectable loss, bursts, reorder, duplicates, outages, `sessionId` change, `--clock-ppm`, `--seed`. **Done**, and verified against `test-receiver` over a real socket | — |
 | **M2** | `crates/receiver-core` as a pure library + `receiver-harness` with a simulated DAC clock. De-jitter, concealment, resampler, drift controller, EQ, limiter, telemetry. **~80% of the hard code.** | — |
 | **M3** | C ABI + cbindgen + ffigen, built as a **Windows DLL**, driven by Dart tests on desktop | — |
 | **M4** | Android toolchain only: `cargo-ndk`, two ABIs, `.so` loads, `slr_abi_version()` returns | Emulator |

@@ -30,9 +30,21 @@ use clap::Parser;
     version
 )]
 struct Args {
-    /// Desktop address to receive from, e.g. 10.0.0.1:45872.
+    /// Desktop address to join, e.g. 10.0.0.1:45871.
+    ///
+    /// Joining a live desktop needs the control server, which does not exist
+    /// yet. To receive audio now, use `--listen` with the reference
+    /// transmitter.
     #[arg(long)]
     server: Option<String>,
+
+    /// Bind here and receive audio, e.g. 0.0.0.0:45872.
+    ///
+    /// Audio is pushed over UDP, so a receiver binds rather than connecting.
+    /// This works today against `stagelink-reference-transmitter`; it needs no
+    /// pairing because the plaintext transport needs no keys.
+    #[arg(long)]
+    listen: Option<String>,
 
     /// Write the received audio to this WAV file.
     #[arg(long)]
@@ -63,18 +75,89 @@ fn main() -> Result<()> {
         return self_test(args.output.as_deref());
     }
 
-    if args.server.is_none() {
+    if let Some(address) = args.listen.as_deref() {
+        return listen(address, args.duration_secs, args.output.as_deref());
+    }
+
+    if args.server.is_some() {
         anyhow::bail!(
-            "--server is required. Note that the desktop streaming engine is Phase 3 work and \
-             cannot send audio yet; use --self-test to exercise this receiver's analysis path."
+            "Joining a live desktop requires the control server (Phase 5), which is not \
+             implemented. This binary will not pretend to have received audio it did not \
+             receive. Use --listen <addr:port> with stagelink-reference-transmitter to receive \
+             real packets today."
         );
     }
 
     anyhow::bail!(
-        "Receiving from a live desktop requires the streaming engine (Phase 3) and the pairing \
-         handshake (Phase 5), neither of which is implemented. This binary will not pretend to \
-         have received audio it did not receive."
+        "Nothing to do. Pass --listen <addr:port> to receive packets, or --self-test to \
+         exercise the analysis path with no network."
     )
+}
+
+/// Binds a UDP socket and accumulates whatever arrives.
+///
+/// Stops on an end-of-stream marker or when the time runs out, whichever comes
+/// first. A silent socket is reported as an error rather than an empty success:
+/// "no audio arrived" is the single most important thing this binary can say.
+fn listen(address: &str, duration_secs: u64, output: Option<&std::path::Path>) -> Result<()> {
+    use std::net::UdpSocket;
+    use std::time::{Duration, Instant};
+
+    let socket = UdpSocket::bind(address)
+        .with_context(|| format!("binding {address}; is another receiver already running?"))?;
+    // A timeout rather than a blocking read, so a stream that stops dead still
+    // produces a report instead of hanging.
+    socket
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .context("setting a read timeout")?;
+
+    tracing::info!(%address, duration_secs, "listening for StageLink audio");
+
+    // One MTU is the largest datagram the protocol permits, and a larger read
+    // would silently truncate rather than reveal a misconfigured sender.
+    let mut buffer = vec![0_u8; 1_500];
+    let mut sink = PacketSink::new(48_000);
+    let mut first_from: Option<std::net::SocketAddr> = None;
+    let deadline = Instant::now() + Duration::from_secs(duration_secs);
+
+    while Instant::now() < deadline {
+        match socket.recv_from(&mut buffer) {
+            Ok((len, from)) => {
+                if first_from.is_none() {
+                    tracing::info!(%from, "first packet");
+                    first_from = Some(from);
+                }
+                sink.accept(&buffer[..len])?;
+                if sink.report().end_of_stream {
+                    tracing::info!("end-of-stream marker received; stopping");
+                    break;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => return Err(error).context("receiving"),
+        }
+    }
+
+    let report = sink.report();
+    println!("{report}");
+
+    if report.accepted == 0 {
+        anyhow::bail!(
+            "no StageLink packets arrived at {address} in {duration_secs}s. Check the sender's \
+             target address, that both ends are on the same network, and the firewall."
+        );
+    }
+
+    if let Some(path) = output {
+        sink.write_wav(path)?;
+        println!("wrote {} frames to {}", report.frames, path.display());
+    }
+
+    Ok(())
 }
 
 /// Exercises the full analysis path against synthetic packets.
