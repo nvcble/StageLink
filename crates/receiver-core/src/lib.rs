@@ -35,8 +35,14 @@
 //! maximum no call can exceed, and an unconditional clip runs afterwards. See
 //! [`dsp`].
 
+pub mod conceal;
+pub mod drift;
 pub mod dsp;
+pub mod resample;
 pub mod jitter;
 
+pub use conceal::Concealer;
+pub use drift::{DriftConfig, DriftController};
 pub use dsp::{MonitorChain, MonitorSettings, SafetyProfile};
 pub use jitter::{Insert, JitterBuffer, Ready, SLOTS};
+pub use resample::Resampler;
