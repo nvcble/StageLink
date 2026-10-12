@@ -1,0 +1,117 @@
+[workspace]
+resolver = "3"
+members = [
+    "audio-core",
+    "audio-protocol",
+    "audio-capture",
+    "stream-server",
+    "receiver-session",
+    "device-discovery",
+    "telemetry",
+    "persistence",
+    "desktop-ipc",
+    "stagelink-service",
+    "test-receiver",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "UNLICENSED"
+authors = ["StageLink"]
+repository = "https://github.com/stagelink/stagelink"
+
+[workspace.dependencies]
+# Internal
+audio-core = { path = "audio-core" }
+audio-protocol = { path = "audio-protocol" }
+audio-capture = { path = "audio-capture" }
+stream-server = { path = "stream-server" }
+receiver-session = { path = "receiver-session" }
+device-discovery = { path = "device-discovery" }
+telemetry = { path = "telemetry" }
+persistence = { path = "persistence" }
+desktop-ipc = { path = "desktop-ipc" }
+
+# Async runtime. `net` brings in the Windows named-pipe types used by desktop-ipc.
+tokio = { version = "1.53", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "sync",
+    "time",
+    "signal",
+    "process",
+] }
+
+# Serialisation. The control protocol is NDJSON; audio packets are hand-encoded.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Errors & logging
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "time"] }
+
+# Primitives
+uuid = { version = "1.28", features = ["v4", "serde"] }
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+ringbuf = "0.5"
+bytes = "1.12"
+hex = "0.4"
+base64 = "0.23"
+rand = "0.10"
+clap = { version = "4.6", features = ["derive"] }
+dirs = "7.0"
+
+# Persistence. `bundled` compiles SQLite in so no system library is required.
+rusqlite = { version = "0.40", features = ["bundled", "backup"] }
+
+# Platform / system
+sysinfo = "0.39"
+mdns-sd = "0.21"
+hound = "3.5"
+
+# Cryptography (production transport — Phase 5)
+chacha20poly1305 = "0.11"
+blake3 = "1.8"
+ed25519-dalek = { version = "3.0", features = ["rand_core"] }
+
+[workspace.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_Multimedia",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_Devices_Properties",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_System_Variant",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_System_SystemInformation",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Authorization",
+    "Win32_NetworkManagement_Ndis",
+]
+
+[profile.release]
+# Audio code benefits measurably from LTO; the binary is small either way.
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+
+[profile.dev]
+# Keep debug builds fast enough that the capture thread still meets deadlines.
+opt-level = 1

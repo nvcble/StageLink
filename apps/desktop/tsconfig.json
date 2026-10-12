@@ -1,0 +1,12 @@
+{
+  // Nuxt generates the real project references into .nuxt during `nuxt
+  // prepare`. This file exists so editors and `vue-tsc` find them, and so the
+  // renderer is typechecked with exactly the config Nuxt builds with.
+  "extends": "./.nuxt/tsconfig.json",
+  "files": [],
+  "references": [
+    { "path": "./.nuxt/tsconfig.app.json" },
+    { "path": "./.nuxt/tsconfig.node.json" },
+    { "path": "./.nuxt/tsconfig.shared.json" }
+  ]
+}

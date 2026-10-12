@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023", "DOM"],
+    "types": ["node", "electron"],
+    "paths": {
+      "@stagelink/shared-protocol": ["../../packages/shared-protocol/src/index.ts"]
+    }
+  },
+  "include": ["electron/**/*.ts", "electron.tsup.config.ts", "electron-builder.config.cjs"]
+}

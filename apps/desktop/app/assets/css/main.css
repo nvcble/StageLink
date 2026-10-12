@@ -1,0 +1,196 @@
+@import 'tailwindcss';
+@import '@nuxt/ui';
+
+/**
+ * StageLink design system.
+ *
+ * A dark, restrained, instrument-like surface. The rule applied throughout:
+ * colour carries meaning. Purple and cyan are brand and interaction; green,
+ * amber and red mean healthy, warning and fault, and are never used
+ * decoratively, because in a live service an operator reads colour before text.
+ */
+
+@theme {
+  /* -- Brand palette ---------------------------------------------------- */
+  --color-stage-bg: #080b16;
+  --color-stage-surface: #111827;
+  --color-stage-elevated: #1a2335;
+  --color-stage-border: #243049;
+
+  --color-stage-purple: #7c3aed;
+  --color-stage-purple-soft: #a378f5;
+  --color-stage-cyan: #06b6d4;
+  --color-stage-cyan-soft: #4fd8ec;
+
+  --color-stage-text: #f8fafc;
+  --color-stage-muted: #94a3b8;
+  --color-stage-faint: #64748b;
+
+  --color-stage-success: #22c55e;
+  --color-stage-warning: #f59e0b;
+  --color-stage-error: #ef4444;
+
+  /* -- Metering ---------------------------------------------------------
+   * Deliberately not the brand gradient: a meter is an instrument, and green
+   * through amber to red is the convention every audio engineer already reads
+   * without thinking.
+   */
+  --color-meter-low: #22c55e;
+  --color-meter-mid: #a3e635;
+  --color-meter-high: #f59e0b;
+  --color-meter-clip: #ef4444;
+
+  /* -- Typography -------------------------------------------------------- */
+  --font-sans:
+    'Inter var', 'Inter', 'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif;
+  /* Numeric readouts use tabular figures so values do not jitter as they
+   * change — a level that shifts horizontally while updating is unreadable. */
+  --font-mono: 'Cascadia Mono', 'JetBrains Mono', 'Consolas', ui-monospace, monospace;
+
+  --radius-panel: 0.75rem;
+}
+
+/* Map Nuxt UI's semantic colour aliases onto the StageLink palette. */
+:root {
+  --ui-primary: var(--color-stage-purple);
+  --ui-secondary: var(--color-stage-cyan);
+  --ui-success: var(--color-stage-success);
+  --ui-warning: var(--color-stage-warning);
+  --ui-error: var(--color-stage-error);
+
+  --ui-bg: var(--color-stage-bg);
+  --ui-bg-muted: var(--color-stage-surface);
+  --ui-bg-elevated: var(--color-stage-elevated);
+  --ui-border: var(--color-stage-border);
+  --ui-text: var(--color-stage-text);
+  --ui-text-muted: var(--color-stage-muted);
+  --ui-text-dimmed: var(--color-stage-faint);
+
+  color-scheme: dark;
+}
+
+html,
+body,
+#__nuxt {
+  height: 100%;
+}
+
+body {
+  background-color: var(--color-stage-bg);
+  color: var(--color-stage-text);
+  font-family: var(--font-sans);
+  /* A desktop application should not rubber-band or text-select like a page. */
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Values an operator may legitimately want to copy — IP addresses, session
+ * ids, device names — opt back into selection. */
+.selectable,
+input,
+textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* -- Scrollbars --------------------------------------------------------- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-stage-border) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-stage-border);
+  border-radius: 9999px;
+  border: 2px solid var(--color-stage-bg);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #31405f;
+}
+
+/* -- Component primitives ----------------------------------------------- */
+@utility stage-panel {
+  background-color: var(--color-stage-surface);
+  border: 1px solid var(--color-stage-border);
+  border-radius: var(--radius-panel);
+}
+
+@utility stage-panel-elevated {
+  background-color: var(--color-stage-elevated);
+  border: 1px solid var(--color-stage-border);
+  border-radius: var(--radius-panel);
+}
+
+/* The one place the brand gradient is used as a fill. Restrained on purpose:
+ * everywhere else it appears as a 1–2px accent. */
+@utility stage-gradient {
+  background-image: linear-gradient(
+    135deg,
+    var(--color-stage-purple) 0%,
+    var(--color-stage-cyan) 100%
+  );
+}
+
+@utility stage-gradient-text {
+  background-image: linear-gradient(
+    135deg,
+    var(--color-stage-purple-soft) 0%,
+    var(--color-stage-cyan-soft) 100%
+  );
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+}
+
+@utility stage-numeric {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* -- Motion ------------------------------------------------------------- */
+@keyframes stage-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@utility stage-pulse {
+  animation: stage-pulse 2s ease-in-out infinite;
+}
+
+/* Honour both the OS setting and the in-app Reduce Motion preference. The
+ * in-app one exists because a stage laptop is often not configured by the
+ * person operating it. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+html.reduce-motion *,
+html.reduce-motion *::before,
+html.reduce-motion *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}

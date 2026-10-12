@@ -1,0 +1,17 @@
+[package]
+name = "device-discovery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Network adapter enumeration and mDNS/DNS-SD service advertisement for StageLink."
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+mdns-sd = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }

@@ -1,0 +1,13 @@
+[package]
+name = "audio-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Real-time-safe audio primitives shared across the StageLink engine: formats, level metering, conversion and lock-free buffering."
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+ringbuf = { workspace = true }

@@ -1,0 +1,44 @@
+[package]
+name = "stagelink-service"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The StageLink native audio service. Spawned and supervised by StageLink Core."
+
+[lib]
+name = "stagelink_service"
+path = "src/lib.rs"
+
+[[bin]]
+name = "stagelink-service"
+path = "src/main.rs"
+
+# Development tool used by tests/protocol to cross-check the Rust and
+# TypeScript protocol definitions. Not packaged.
+[[bin]]
+name = "protocol-probe"
+path = "src/bin/protocol-probe.rs"
+
+[dependencies]
+audio-core = { workspace = true }
+audio-capture = { workspace = true }
+audio-protocol = { workspace = true }
+device-discovery = { workspace = true }
+desktop-ipc = { workspace = true }
+persistence = { workspace = true }
+receiver-session = { workspace = true }
+stream-server = { workspace = true }
+telemetry = { workspace = true }
+
+anyhow = { workspace = true }
+clap = { workspace = true }
+dirs = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }

@@ -1,0 +1,18 @@
+[package]
+name = "audio-capture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Windows WASAPI capture backend for StageLink: endpoint enumeration, format negotiation and a real-time capture thread."
+
+[dependencies]
+audio-core = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }

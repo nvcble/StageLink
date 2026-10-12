@@ -1,0 +1,17 @@
+[package]
+name = "telemetry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "StageLink metrics with explicit provenance: measured, estimated or receiver-reported."
+
+[dependencies]
+serde = { workspace = true }
+sysinfo = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

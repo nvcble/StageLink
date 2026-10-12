@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+.npm/
+
+# Nuxt
+.nuxt/
+.output/
+.nitro/
+.cache/
+dist/
+
+# Electron build output
+apps/desktop/dist-electron/
+apps/desktop/release/
+
+# Rust
+target/
+**/*.rs.bk
+
+# Generated branding assets (regenerate with `npm run icons`).
+# The source PNG in assets/branding/ is committed and must be preserved.
+assets/branding/generated/
+
+# Local runtime data (databases, logs, recordings)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+logs/
+*.log
+tests/**/recordings/
+# Smoke-test window captures and received audio are build output.
+tests/integration/artifacts/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editors & OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Misc
+*.tsbuildinfo
+coverage/
+.eslintcache

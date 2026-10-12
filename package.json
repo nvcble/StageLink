@@ -1,0 +1,37 @@
+{
+  "name": "stagelink",
+  "version": "0.1.0",
+  "private": true,
+  "description": "StageLink — Wireless In-Ear Monitoring System. Your mix. Your stage. Your sound.",
+  "license": "UNLICENSED",
+  "author": "StageLink",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "tests"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @stagelink/desktop",
+    "build": "npm run build --workspace @stagelink/shared-protocol && npm run build --workspace @stagelink/desktop",
+    "build:service": "cargo build --release --manifest-path crates/Cargo.toml",
+    "package": "npm run build && npm run build:service && npm run package --workspace @stagelink/desktop",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "test:rust": "cargo test --manifest-path crates/Cargo.toml",
+    "lint": "npm run lint --workspaces --if-present",
+    "icons": "node scripts/generate-icons.mjs",
+    "clean": "node scripts/clean.mjs",
+    "test:protocol": "npm run test --workspace @stagelink/tests"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "concurrently": "^10.0.6",
+    "cross-env": "^10.1.0",
+    "png-to-ico": "^3.0.2",
+    "typescript": "~6.0.3"
+  }
+}

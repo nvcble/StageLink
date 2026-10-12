@@ -1,0 +1,16 @@
+[package]
+name = "stream-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "StageLink audio packetisation and UDP transmission."
+
+[dependencies]
+audio-core = { workspace = true }
+audio-protocol = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

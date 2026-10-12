@@ -1,0 +1,13 @@
+[package]
+name = "audio-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "StageLink binary audio packet format: framing, sequencing and the transport abstraction shared by the desktop and StageLink Mobile."
+
+[dependencies]
+audio-core = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
