@@ -297,6 +297,23 @@ impl ReceiverSession {
         self.control.leave();
         self.socket.stop();
     }
+
+    /// Splits into the two halves a phone actually has.
+    ///
+    /// Needed wherever the audio callback runs on its own thread — which is
+    /// everywhere except this crate's own command-line receiver, where one
+    /// thread does both and the simpler shape is fine.
+    #[must_use]
+    pub fn into_halves(self) -> (crate::halves::SessionControl, crate::halves::SessionRender) {
+        crate::halves::split(
+            self.control,
+            self.socket,
+            self.audio,
+            self.status,
+            self.confirmed_sample_rate,
+            self.session_id,
+        )
+    }
 }
 
 #[cfg(test)]

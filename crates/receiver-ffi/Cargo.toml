@@ -1,0 +1,24 @@
+[package]
+name = "receiver-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The C ABI the StageLink mobile app calls. Control only; no audio crosses it per packet."
+
+[lib]
+name = "stagelink_receiver"
+# cdylib for the app to load; staticlib so iOS can link it; rlib so the tests
+# in this crate can use the Rust types directly.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+receiver-client = { workspace = true }
+receiver-core = { workspace = true }
+
+anyhow = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "net", "sync"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

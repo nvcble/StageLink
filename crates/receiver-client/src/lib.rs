@@ -22,11 +22,13 @@
 //! of the app, it is the app's own lower half with a different output.
 
 pub mod audio;
+pub mod halves;
 pub mod control;
 pub mod join_payload;
 pub mod session;
 
 pub use audio::{AudioSocket, SocketStats};
+pub use halves::{SessionControl, SessionRender, SettingsInbox};
 pub use control::{
     ConnectionState, ControlClient, ControlEvent, ControlStatus, DeviceIdentity,
     TelemetryReport, Welcome,

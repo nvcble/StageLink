@@ -49,3 +49,13 @@ desktop.ini
 *.tsbuildinfo
 coverage/
 .eslintcache
+
+# Flutter / Android build output
+apps/mobile/build/
+apps/mobile/.dart_tool/
+apps/mobile/android/.gradle/
+apps/mobile/android/local.properties
+apps/mobile/.flutter-plugins-dependencies
+# Cross-compiled Rust libraries: built by tool/build_android.ps1, 2 MB each,
+# and regenerated from source.
+apps/mobile/android/app/src/main/jniLibs/

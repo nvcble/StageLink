@@ -200,6 +200,26 @@ struct Shared {
     playing: AtomicBool,
 }
 
+/// A read-only view of the counters, usable from any thread.
+///
+/// Needed because the thing that *reports* telemetry is neither half: on a
+/// phone the control channel sends it, and the control channel owns neither
+/// the socket nor the audio callback. Handing it a clone of this is cheaper
+/// and safer than routing the figures through one of the halves that is busy
+/// doing something real-time.
+#[derive(Clone)]
+pub struct TelemetryHandle {
+    shared: Arc<Shared>,
+    config: ReceiverConfig,
+}
+
+impl TelemetryHandle {
+    #[must_use]
+    pub fn read(&self) -> Telemetry {
+        telemetry(&self.shared, self.config)
+    }
+}
+
 /// Builds a receiver, returning its two halves.
 ///
 /// Returned as a pair rather than as one object with two sets of methods,
@@ -337,6 +357,13 @@ impl NetworkInput {
         self.shared
             .reordered
             .store(self.tracker.reordered(), Ordering::Relaxed);
+    }
+
+    /// A handle the control channel can keep, so it can report telemetry
+    /// without borrowing either half.
+    #[must_use]
+    pub fn telemetry_handle(&self) -> TelemetryHandle {
+        TelemetryHandle { shared: Arc::clone(&self.shared), config: self.config }
     }
 
     /// A snapshot for the telemetry report. Safe from any thread.
@@ -680,6 +707,13 @@ impl AudioOutput {
         self.shared
             .drift_error_milliframes
             .store(error as u64, Ordering::Relaxed);
+    }
+
+    /// A handle the control channel can keep, so it can report telemetry
+    /// without borrowing either half.
+    #[must_use]
+    pub fn telemetry_handle(&self) -> TelemetryHandle {
+        TelemetryHandle { shared: Arc::clone(&self.shared), config: self.config }
     }
 
     /// A snapshot for the telemetry report.

@@ -17,6 +17,7 @@ members = [
     "receiver-core",
     "receiver-harness",
     "receiver-client",
+    "receiver-ffi",
 ]
 
 [workspace.package]
@@ -42,6 +43,7 @@ control-server = { path = "control-server" }
 reference-transmitter = { path = "reference-transmitter" }
 receiver-core = { path = "receiver-core" }
 receiver-client = { path = "receiver-client" }
+receiver-ffi = { path = "receiver-ffi" }
 receiver-harness = { path = "receiver-harness" }
 
 # Async runtime. `net` brings in the Windows named-pipe types used by desktop-ipc.
@@ -134,3 +136,12 @@ strip = "debuginfo"
 [profile.dev]
 # Keep debug builds fast enough that the capture thread still meets deadlines.
 opt-level = 1
+
+# The mobile receiver core. `panic = "unwind"` is mandatory and is the whole
+# reason this profile exists: `receiver-ffi` catches panics at every `extern
+# "C"` entry point so one cannot unwind into Dart or Kotlin, and `catch_unwind`
+# does nothing under `panic = "abort"`. Build the mobile library with
+# `--profile mobile`, never plain `--release`.
+[profile.mobile]
+inherits = "release"
+panic = "unwind"

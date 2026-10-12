@@ -1,0 +1,20 @@
+# Android cross-compilation.
+#
+# Points Cargo at the NDK's own clang wrappers, which carry the right sysroot
+# and API level in their filename. `cargo-ndk` would normally do this; version
+# 4.1.2 panics on this workspace, and configuring it here is less magic
+# anyway — the paths are visible and a broken NDK path is an error you can
+# read.
+#
+# API 29 is `minSdk`: `WIFI_MODE_FULL_LOW_LATENCY` arrives there, and it is
+# the single most valuable Android API for this product. AAudio's low-latency
+# path is also reliable from 29 onwards.
+#
+# Two ABIs only. `armeabi-v7a` is irrelevant at minSdk 29, and `x86` is
+# emulator-only at a bitness nothing ships.
+
+[target.aarch64-linux-android]
+linker = "C:/Users/MarkN/AppData/Local/Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android29-clang.cmd"
+
+[target.x86_64-linux-android]
+linker = "C:/Users/MarkN/AppData/Local/Android/Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/bin/x86_64-linux-android29-clang.cmd"

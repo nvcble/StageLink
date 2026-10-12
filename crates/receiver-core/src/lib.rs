@@ -46,5 +46,7 @@ pub use conceal::Concealer;
 pub use drift::{DriftConfig, DriftController};
 pub use dsp::{MonitorChain, MonitorSettings, SafetyProfile};
 pub use jitter::{Insert, JitterBuffer, Ready, SLOTS};
-pub use receiver::{Accepted, AudioOutput, NetworkInput, Preset, ReceiverConfig, Telemetry};
+pub use receiver::{
+    Accepted, AudioOutput, NetworkInput, Preset, ReceiverConfig, Telemetry, TelemetryHandle,
+};
 pub use resample::Resampler;

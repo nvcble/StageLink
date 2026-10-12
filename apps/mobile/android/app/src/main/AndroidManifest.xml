@@ -1,0 +1,107 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Permissions, each with a reason. Every one of these is something Android
+      will otherwise do *to* the audio rather than for it.
+    -->
+
+    <!-- The audio and control channels. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      Needed for WifiManager.createWifiLock. Without the lock, Wi-Fi power
+      save buffers unicast packets at the access point and delivers them in
+      bursts — spikes well over 100 ms, which no sane jitter buffer absorbs.
+      This is the single most important entry in this file.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Keeps the process alive while a performer is monitoring. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!--
+      mediaPlayback, not mediaProcessing: mediaProcessing has a six-hour
+      timeout on Android 14+, and a service is longer than nothing.
+    -->
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+
+    <!-- Scanning the join QR the operator displays. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!--
+      The camera is used once, to scan a code. A phone with no camera could
+      still receive audio if the address were entered by hand, so this is not
+      required.
+    -->
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+
+    <!-- Wi-Fi is not optional: there is no other way to receive the mix. -->
+    <uses-feature
+        android:name="android.hardware.wifi"
+        android:required="true" />
+
+    <!--
+      Low-latency audio output is what the product is. A device without it can
+      still install the app and will still work, just later — so this is
+      declared and not required, rather than excluding hardware a church may
+      already own.
+    -->
+    <uses-feature
+        android:name="android.hardware.audio.low_latency"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.audio.pro"
+        android:required="false" />
+
+    <application
+        android:label="StageLink"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+
+        <!--
+          The foreground service that keeps audio running when the screen
+          locks. Declared here so the type is fixed at install time; it is
+          started by the app when a session begins.
+        -->
+        <service
+            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
+            android:foregroundServiceType="mediaPlayback"
+            android:exported="false" />
+
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+    </queries>
+</manifest>

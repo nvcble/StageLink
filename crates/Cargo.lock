@@ -918,6 +918,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "receiver-ffi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "parking_lot",
+ "receiver-client",
+ "receiver-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "receiver-harness"
 version = "0.1.0"
 dependencies = [
