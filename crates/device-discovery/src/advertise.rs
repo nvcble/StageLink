@@ -3,9 +3,10 @@
 //! ## Phase status
 //!
 //! The service type and TXT-record contract below are **frozen** — StageLink
-//! Mobile browses for exactly this, and `docs/protocol/discovery.md` is written
-//! from these constants. Actually publishing the record is Phase 3/5 work and
-//! is behind an explicit `publish()` call so a development build never
+//! Mobile browses for exactly this. The prose version lives in the "Service
+//! discovery" section of `docs/protocol/pairing.md`; there is no separate
+//! discovery document. Actually publishing the record is Phase 5 work and will
+//! be behind an explicit `publish()` call so a development build never
 //! announces itself on a venue network by accident.
 //!
 //! Security note that belongs with the contract, not just the implementation:
@@ -45,12 +46,30 @@ pub struct ServiceAdvertisement {
     /// detect that it is talking to a *different* desktop than last time.
     /// A fingerprint is a hash, not a secret.
     pub key_fingerprint: String,
-    /// Always true in a release build. Advertised so a receiver can show
-    /// "needs approval" before the operator is standing at the laptop.
+    /// Always true: a join code is the only way in. Advertised so a receiver
+    /// that finds a desktop it has never joined can say "scan the code on the
+    /// operator's screen" rather than failing with a bare connection error.
     pub requires_pairing: bool,
 }
 
 impl ServiceAdvertisement {
+    /// The port that goes in the SRV record.
+    ///
+    /// **This is the audio UDP port, not the control port.** The service type
+    /// is `_stagelink._udp`, and an SRV record carrying a TCP port under a
+    /// `_udp` type would be wrong in a way that only breaks for whichever
+    /// third-party browser takes the record at face value.
+    ///
+    /// A receiver must therefore read [`TXT_KEY_CONTROL_PORT`] for the control
+    /// channel and must not connect it to the SRV port. The redundancy between
+    /// the SRV port and `sport` is deliberate: the TXT value is what a
+    /// receiver is told to use, and the SRV record is what the protocol
+    /// requires to be populated.
+    #[must_use]
+    pub const fn srv_port(&self) -> u16 {
+        self.stream_port
+    }
+
     /// Builds the TXT record properties.
     ///
     /// Deliberately excludes anything secret. If a future field would need to
@@ -119,6 +138,18 @@ mod tests {
         // StageLink Mobile browses for this exact string; changing it is a
         // breaking protocol change, not a refactor.
         assert_eq!(SERVICE_TYPE, "_stagelink._udp.local.");
+    }
+
+    /// Pinned because a publisher reaching for "the port" would reasonably
+    /// pick the control port, and the mistake is invisible to our own
+    /// receiver — which reads `cport` — while being wrong for anything else
+    /// that browses the record.
+    #[test]
+    fn the_srv_port_is_the_audio_port_to_match_the_udp_service_type() {
+        let advertisement = advertisement();
+        assert_eq!(advertisement.srv_port(), advertisement.stream_port);
+        assert_ne!(advertisement.srv_port(), advertisement.control_port);
+        assert!(SERVICE_TYPE.contains("._udp."));
     }
 
     #[test]

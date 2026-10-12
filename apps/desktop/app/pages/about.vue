@@ -162,11 +162,12 @@ async function openRepository() {
     <!-- Latency note -->
     <SharedStagePanel title="About latency" icon="i-lucide-timer">
       <p class="text-sm leading-relaxed text-stage-muted">
-        StageLink targets roughly 15–30 ms from this desktop to a wired earphone under favourable
-        conditions. That is a design target, not a measured guarantee. Real end-to-end latency
-        depends on your audio interface, its driver, Windows scheduling, Wi-Fi conditions, the
-        receiver's jitter buffer and the mobile audio output path — several of which the desktop
-        cannot measure at all.
+        StageLink targets 40–90 ms from this desktop to a wired earphone on Android, under
+        favourable conditions. That is a design target, not a measured guarantee. Real end-to-end
+        latency depends on your audio interface, its driver, Windows scheduling, Wi-Fi conditions,
+        the receiver's jitter buffer and the mobile audio output path — several of which the
+        desktop cannot measure at all, and the last of which varies by an order of magnitude
+        between phones.
       </p>
       <p class="mt-3 text-sm leading-relaxed text-stage-muted">
         The Diagnostics page shows the desktop-side contributions it can genuinely measure, each

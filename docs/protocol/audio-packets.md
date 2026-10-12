@@ -56,14 +56,78 @@ capability; possessing it grants nothing.
 
 ## Encryption (production transport)
 
+> **Status:** specified and cross-tested, **not yet implemented.** The nonce and
+> key derivation below are normative so a receiver can be built against them;
+> there is no ChaCha20-Poly1305 code in the repository yet. `aead_nonce()` /
+> `aeadNonce()` exist in both implementations and are pinned to each other, so
+> the one part that must be byte-identical is already falsifiable.
+
 ```
 ciphertext || tag = ChaCha20-Poly1305(
-    key   = per-session key from the paired control handshake,
-    nonce = derived from sessionId || sequence,
-    aad   = the 24-byte header,
+    key   = HKDF-SHA256(
+                ikm  = control-channel shared secret,
+                salt = sessionId as 4 bytes little-endian,
+                info = "stagelink audio v1",
+                len  = 32),
+    nonce = aead_nonce(sessionId, sequence),   // 12 bytes, below
+    aad   = the 24-byte header, exactly as transmitted,
     plaintext = PCM S16LE samples
 )
 ```
+
+`tag` is the 16-byte Poly1305 tag, appended after the ciphertext. The ciphertext
+is the same length as the plaintext (ChaCha20 is a stream cipher), so an
+encrypted datagram is exactly 16 bytes longer than its plaintext equivalent.
+
+### Nonce layout
+
+```
+ offset size contents
+ ------ ---- ----------------------------------------------
+      0    4 zero — reserved for a future epoch field
+      4    4 sessionId, little-endian
+      8    4 sequence,  little-endian
+```
+
+Four *leading* zero bytes, not trailing: the varying part belongs in the
+low-order half, as in TLS and in counter-style constructions generally. A
+receiver must not reject a nonce on the basis of the reserved bytes beyond
+building it as specified here.
+
+**Test vectors** (hex, as transmitted):
+
+| sessionId | sequence | nonce |
+| --- | --- | --- |
+| `0x00005EED` | `0` | `00000000 ED5E0000 00000000` |
+| `0x12345678` | `0xFFFFFFFF` | `00000000 78563412 FFFFFFFF` |
+
+These are asserted in `crates/audio-protocol/src/packet.rs`,
+`packages/shared-protocol/test/protocol.test.ts`, and compared across the two
+implementations in `tests/protocol/cross-implementation.test.ts`.
+
+### Why the nonce is specified to the byte
+
+Nonce reuse under ChaCha20-Poly1305 is catastrophic rather than merely weak. Two
+packets sealed with the same key and nonce leak the XOR of their plaintexts,
+and — far worse — allow the Poly1305 authentication key to be recovered, after
+which an attacker can forge packets that a receiver will accept. A forged packet
+in StageLink is injected audio in a performer's ears, live. So the uniqueness
+argument is stated rather than assumed:
+
+- **The key carries the guarantee.** One key per session means a nonce only has
+  to be unique *within* a session.
+- **`sequence` delivers that**, incrementing by exactly one per packet.
+- **`sessionId` is defence in depth, not the guarantee.** It is a truncated
+  identifier and may repeat; it is in the nonce so that an accidental sequence
+  restart cannot collide with the previous session's packets.
+
+**Senders must obey two rules:**
+
+1. `sequence` wraps at 2^32. At the default 200 packets/second that is 248 days
+   of continuous streaming, so it cannot occur inside a service — but a sender
+   reaching the wrap **must** rekey rather than continue.
+2. A new session **must** take a fresh `sessionId`, and therefore a fresh
+   derived key, before `sequence` restarts at zero.
 
 Keys are per-session, derived during the authenticated control-channel
 handshake, and never appear in a datagram. A release build refuses the plaintext

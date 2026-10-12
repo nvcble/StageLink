@@ -4,7 +4,7 @@ How StageLink Mobile finds a desktop and joins it.
 
 > **Phase status.** The QR payload grammar and the join-code semantics below are
 > **frozen** — build against them. Minting a code works today; accepting the
-> connection needs the control server from Phase 3, so `receivers.rename`,
+> connection needs the control server from Phase 5, so `receivers.rename`,
 > `disconnect` and `revoke` currently return `NOT_IMPLEMENTED`.
 
 ## The model: scanning is the authorisation
@@ -53,6 +53,11 @@ instance     : operator-configurable, default "StageLink Core", ≤ 63 bytes
 Nothing secret is ever advertised: no tokens, no keys, no join codes. A
 fingerprint is a hash.
 
+**The SRV record's port is the audio UDP port**, matching the `_udp` service
+type. Read `cport` from the TXT record for the control channel; do not connect
+it to the SRV port. The duplication between the SRV port and `sport` is
+deliberate — SRV must carry a port, and TXT is what a receiver is told to use.
+
 Many venue networks block multicast, so discovery failing must never be a dead
 end — fall back to the address from the QR, or to manual entry.
 
@@ -87,13 +92,16 @@ stagelink://join?h=10.0.0.1&c=45871&s=45872&t=9f2c...64hex...&v=1.0.0
 
 ### 1. Scan and connect
 
-Parse the payload, open the control channel to `h:c`, and present the token
-along with the device's self-description.
+Parse the payload, open the control channel to `h:c`, and send a `hello` — the
+same first message the desktop's own local client sends, with the join token in
+`token` and the device's self-description in `receiver`.
 
 ```jsonc
-{ "v": 1, "kind": "request", "id": "1", "method": "join.request",
-  "params": {
-    "token": "9f2c…",
+{ "v": 1, "kind": "hello",
+  "token": "9f2c…",
+  "client": "stagelink-mobile/0.1.0",
+  "controlProtocolVersion": "1.0.0",
+  "receiver": {
     "deviceName": "Pixel 8",
     "platform": "android",
     "platformVersion": "15",
@@ -102,23 +110,71 @@ along with the device's self-description.
   } }
 ```
 
-Everything except the observed source address is self-reported and untrusted.
-The desktop stores `publicKey` so the device can reconnect later without a fresh
-code.
+**There is no `join.request` method.** An earlier draft of this document showed
+one, which could never have worked: the envelope contract requires `hello` to be
+the first message on a connection and to carry the credential, so a second
+credential-bearing frame could not have been first. Joining is a `hello` with a
+`receiver` block — one round trip, and the token arrives in the field that is
+already compared in constant time.
+
+Everything in `receiver` except the observed source address is self-reported and
+untrusted; the desktop trims and clamps each string on the way in. The desktop
+stores `publicKey` so the device can reconnect later without a fresh code.
 
 ### 2. Admitted, or not
 
 The desktop compares the token in constant time and checks it has not expired.
-On success the receiver is `approved` and appears in the roster immediately.
+On success it replies with a `welcome` and the receiver is `approved` and in the
+roster immediately. The `welcome` carries what the receiver cannot otherwise
+know:
 
-| Failure | Error code |
+```jsonc
+{ "v": 1, "kind": "welcome",
+  "serviceVersion": "0.1.0",
+  "controlProtocolVersion": "1.0.0",
+  "audioProtocolVersion": 1,
+  "availableAudioApis": ["wasapi"],
+  "pid": 12345,
+  "keyFingerprint": "AB:CD:EF:01",
+  "stream": {
+    "sessionId": 1589741,
+    "sampleRate": 48000,
+    "frameDurationMs": 5,
+    "payloadFormat": "pcm_s16le",
+    "transport": "udp-encrypted",
+    "streamPort": 45872,
+    "framesPerPacket": 240
+  } }
+```
+
+**`stream.sampleRate` is the only place the rate is communicated.** The packet
+header carries `channels` and `payloadFormat` but no rate, and the sender
+permits 8–192 kHz, so a receiver that assumed 48 kHz and got 44.1 kHz would play
+a semitone and a half sharp — in a performer's ears, live. A conforming receiver
+must also derive the rate independently as
+`framesPerPacket / (Δ timestampUs / 1e6)` across two consecutive in-order
+packets and refuse to play if the two disagree. `stream` is re-sent whenever
+`sessionId` changes, because the rate may change with it.
+
+On failure the desktop closes the connection rather than answering: there is no
+correlation id on a `hello`, so there is nothing to respond to. A rejected
+receiver sees the socket close after its `hello`, and should tell the user to
+ask for a fresh code rather than retry in a loop — the token will not start
+working. The error codes below are what the desktop logs and what the operator
+sees; they are not delivered to the receiver.
+
+| Failure | Logged as |
 | --- | --- |
 | Wrong or expired token | `PAIRING_REJECTED` |
 | Receiver limit reached | `RECEIVER_LIMIT_REACHED` |
 | This device was revoked | `PAIRING_REJECTED` |
+| Incompatible control protocol major | `PROTOCOL_MISMATCH` |
 
-A rejected receiver should tell the user to ask for a fresh code, not retry in a
-loop — the token will not start working.
+> **Open item.** A closed socket cannot distinguish "the session is full" from
+> "that code expired", and those call for different words on the phone. Giving
+> the receiver the reason needs a server→receiver message defined somewhere
+> other than the renderer's event registry, which is a control-server design
+> decision and is deliberately left open rather than guessed at here.
 
 ### 3. Session keys
 
@@ -140,25 +196,50 @@ fresh code if:
 **Pin `fp` after joining.** A changed fingerprint is the one signal that
 distinguishes "my desktop got a new IP" from "something else is answering".
 
-## Receiver telemetry
+## Heartbeats and receiver telemetry
 
-Admitted receivers report quality every 2 s and heartbeat every 1 s. Five
-consecutive missed heartbeats move a receiver to `timedOut` and stop audio being
-queued for it.
+Admitted receivers heartbeat every 1 s (`RECEIVER_HEARTBEAT_INTERVAL_MS`) and
+report quality every 2 s (`RECEIVER_TELEMETRY_INTERVAL_MS`). Five consecutive
+missed heartbeats (`RECEIVER_HEARTBEAT_MISS_LIMIT`) move a receiver to
+`timedOut` and stop audio being queued for it.
+
+**Both are `request` methods, not events.** An earlier draft showed them as
+client-sent events, which the control server discards by design — events travel
+server→client only. As requests they also get an acknowledgement, which is what
+makes a heartbeat worth sending: the ack confirms liveness in both directions
+and hands the receiver its round-trip time without any local bookkeeping.
 
 ```jsonc
-{ "v": 1, "kind": "event", "event": "receiver.telemetry",
-  "payload": {
-    "source": "receiver-reported",
+// -> receiver.heartbeat, every 1 s
+{ "v": 1, "kind": "request", "id": "h-412", "method": "receiver.heartbeat",
+  "params": { "sentAt": 1791772004653 } }
+
+// <- the ack
+{ "v": 1, "kind": "response", "id": "h-412", "ok": true,
+  "result": { "at": 1791772004661, "sentAt": 1791772004653, "missLimit": 5 } }
+```
+
+```jsonc
+// -> receiver.telemetry, every 2 s
+{ "v": 1, "kind": "request", "id": "t-77", "method": "receiver.telemetry",
+  "params": {
     "reportedAt": 1791772004653,
     "packetsReceived": 12000, "packetsLost": 7, "lossPercent": 0.06,
     "jitterMs": 2.4, "bufferHealthMs": 42.0, "underruns": 0,
-    "playbackState": "playing", "outputLatencyMs": 24.0
+    "playbackState": "playing", "outputLatencyMs": 24.0,
+    "resampleRatioPpm": -14.2
   } }
 ```
 
-The `source` field is mandatory and literal. The desktop cannot verify any of
-it, and the interface says so wherever it is shown.
+`source: "receiver-reported"` and `receivedAt` are **not sent** — the desktop
+stamps both on arrival, so a receiver cannot forge its own provenance. The
+desktop cannot verify any of the rest, and the interface says so wherever it is
+shown.
+
+`resampleRatioPpm` is where the receiver's drift compensation has settled, or
+null if it does not compensate. Report it: a value sitting at its clamp for
+minutes is the only field that reveals clock drift exceeding budget before
+somebody complains about a dropout.
 
 ## Receiver obligations
 
@@ -179,6 +260,13 @@ A conforming receiver must:
 8. Survive unrelated traffic on its ports without aborting.
 9. Never persist a join token after admission. It is single-purpose and
    short-lived; the long-term key is what identifies the device afterwards.
+10. Take the sample rate from `welcome.stream.sampleRate`, **and** check it
+    against the rate implied by the packet timestamps. Refuse to play on
+    disagreement rather than playing the mix at the wrong pitch.
+11. Compensate for clock drift between the desktop's capture clock and its own
+    DAC. At ±20 ppm each, the worst case of 40 ppm accumulates **216 ms** over a
+    90-minute service — enough to starve or overflow any fixed buffer several
+    times over. Report the correction as `resampleRatioPpm`.
 
 ## Hearing safety
 

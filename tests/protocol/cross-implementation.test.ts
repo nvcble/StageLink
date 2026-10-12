@@ -8,13 +8,17 @@ import {
   PACKET_HEADER_BYTES,
   PACKET_MAGIC,
   SUPPORTED_FRAME_DURATIONS_MS,
+  aeadNonce,
   decodeEnvelope,
+  receiverLabel,
+  receiverSchema,
   defaultSettings,
   framesPerPacket,
   sequenceDelta,
 } from '@stagelink/shared-protocol'
 
 import {
+  aeadNonceRust,
   controlProtocolVersion,
   decodeRustEnvelope,
   encodeRustEnvelope,
@@ -22,6 +26,7 @@ import {
   rustDefaultSettings,
   rustMethodNames,
   rustPacketConstants,
+  rustRosterEntry,
   sequenceDeltaRust,
 } from './rust-bridge'
 
@@ -180,6 +185,23 @@ describe('packet arithmetic matches', () => {
       expect(rust, `delta(${previous}, ${current})`).toBe(sequenceDelta(previous, current))
     }
   })
+
+  // Nonce reuse under ChaCha20-Poly1305 permits packet forgery, and a
+  // disagreement between the two implementations means nothing decrypts at
+  // all. Neither failure is subtle, and neither is catchable on one side.
+  it('the AEAD nonce agrees byte for byte', async () => {
+    const cases: Array<[number, number]> = [
+      [0x0000_5eed, 0],
+      [0x1234_5678, 0xffff_ffff],
+      [0, 0],
+      [0xffff_ffff, 0xffff_ffff],
+      [1, 200],
+    ]
+    for (const [sessionId, sequence] of cases) {
+      const rust = await aeadNonceRust(sessionId, sequence)
+      expect(rust, `nonce(${sessionId}, ${sequence})`).toEqual([...aeadNonce(sessionId, sequence)])
+    }
+  })
 })
 
 describe('default settings match', () => {
@@ -212,5 +234,40 @@ describe('default settings match', () => {
     const rust = await rustDefaultSettings()
     expect(rust.streaming.transport).toBe('udp-encrypted')
     expect(defaultSettings().streaming.transport).toBe('udp-encrypted')
+  })
+})
+
+describe('the Rust roster serialiser satisfies the renderer schema', () => {
+  // `receivers.list` validates its result against this schema in the Electron
+  // main process, so a field the Rust side spells differently — or forgets —
+  // rejects the whole list rather than one receiver. The roster is empty in
+  // normal operation, which is exactly why nothing would notice until a phone
+  // joined for the first time.
+  it('accepts an entry carrying receiver-reported telemetry', async () => {
+    const entry = await rustRosterEntry(true)
+    const parsed = receiverSchema.safeParse(entry)
+    expect(parsed.error?.issues ?? [], 'schema issues').toEqual([])
+    expect(parsed.success).toBe(true)
+
+    if (!parsed.success) return
+    // The honesty guarantees, not merely the shape: the desktop stamps the
+    // provenance, so a receiver cannot claim its figures are measured.
+    expect(parsed.data.telemetry?.source).toBe('receiver-reported')
+    expect(parsed.data.pairingState).toBe('approved')
+    // The operator's label must survive serialisation; the device name must
+    // not be substituted for it.
+    expect(receiverLabel(parsed.data)).toBe('Lead Vocal')
+    expect(parsed.data.deviceName).toBe('Pixel 8')
+    expect(parsed.data.platform).toBe('android')
+    // Previously hardcoded, and so unable to report what a receiver said.
+    expect(parsed.data.telemetry?.playbackState).toBe('playing')
+    expect(parsed.data.telemetry?.outputLatencyMs).toBe(38)
+    expect(parsed.data.telemetry?.resampleRatioPpm).toBe(-12)
+  })
+
+  it('accepts an entry that has reported nothing yet', async () => {
+    const parsed = receiverSchema.safeParse(await rustRosterEntry(false))
+    expect(parsed.error?.issues ?? [], 'schema issues').toEqual([])
+    expect(parsed.success && parsed.data.telemetry).toBeNull()
   })
 })

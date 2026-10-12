@@ -12,7 +12,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use audio_core::{RingConsumer, convert};
 use audio_protocol::{
-    AudioPacketHeader, HEADER_BYTES, PacketFlags, encode_header,
+    AEAD_TAG_BYTES, AudioPacketHeader, HEADER_BYTES, PacketFlags, encode_header,
 };
 
 /// Counters for the packetiser.
@@ -72,9 +72,12 @@ impl PacketBuilder {
             sequence: 0,
             frames_emitted: 0,
             samples: vec![0.0; frames_per_packet],
-            // Header plus S16 payload. The AEAD tag is appended by the
-            // transport, which owns the key material.
-            datagram: vec![0; HEADER_BYTES + frames_per_packet * 2],
+            // Header, S16 payload, and room for the AEAD tag. The packetiser
+            // holds no key material so it cannot seal, but it must hand the
+            // transport a datagram that is already the right size with the tag
+            // region reserved — otherwise there is nowhere to write the tag and
+            // the result is unparseable.
+            datagram: vec![0; HEADER_BYTES + frames_per_packet * 2 + AEAD_TAG_BYTES],
             pending_discontinuity: false,
         }
     }
@@ -82,6 +85,18 @@ impl PacketBuilder {
     /// Records that the capture path glitched. The next packet carries the
     /// discontinuity flag so receivers can resynchronise rather than treating
     /// the gap as drift.
+    ///
+    /// # This has no production caller yet
+    ///
+    /// Nothing calls it outside tests, because the UDP sender that would drive
+    /// it does not exist. Until it is wired, a desktop capture glitch reaches
+    /// the receiver as continuous sequence numbers, continuous timestamps and
+    /// no flag — just packets arriving late. The receiver then underruns with
+    /// no loss indication, and an operator cannot tell a desktop stall from
+    /// network loss.
+    ///
+    /// **The sender must call this whenever `CaptureStats::xruns` increases.**
+    /// See `docs/mobile-plan.md` (defect D3).
     pub fn note_discontinuity(&mut self) {
         self.pending_discontinuity = true;
     }
@@ -126,7 +141,17 @@ impl PacketBuilder {
         self.frames_emitted += self.frames_per_packet as u64;
         stats.packets_built.fetch_add(1, Ordering::Relaxed);
 
-        Some(&self.datagram[..HEADER_BYTES + written])
+        // On the encrypted transport, hand back a datagram with the tag region
+        // reserved so the transport can seal the payload in place and write its
+        // tag without reallocating on the hot path.
+        let end = if encrypted {
+            let tag_region = HEADER_BYTES + written..HEADER_BYTES + written + AEAD_TAG_BYTES;
+            self.datagram[tag_region.clone()].fill(0);
+            tag_region.end
+        } else {
+            HEADER_BYTES + written
+        };
+        Some(&self.datagram[..end])
     }
 
     /// Builds a zero-payload end-of-stream marker so receivers stop cleanly
@@ -140,7 +165,19 @@ impl PacketBuilder {
         let header = AudioPacketHeader::new(self.session_id, self.sequence, timestamp_us, flags);
         encode_header(&header, &mut self.datagram).expect("scratch buffer holds a header");
         self.sequence = self.sequence.wrapping_add(1);
-        &self.datagram[..HEADER_BYTES]
+
+        // On the encrypted transport the marker must still carry a tag region:
+        // a zero-length payload is rejected as `MissingAeadTag`, and an
+        // unauthenticated end-of-stream would be forgeable by anyone on the
+        // venue network — silencing every performer at once. The transport
+        // seals an empty plaintext into this region.
+        if encrypted {
+            let tag_region = HEADER_BYTES..HEADER_BYTES + AEAD_TAG_BYTES;
+            self.datagram[tag_region.clone()].fill(0);
+            &self.datagram[..tag_region.end]
+        } else {
+            &self.datagram[..HEADER_BYTES]
+        }
     }
 
     #[must_use]
@@ -320,6 +357,62 @@ mod tests {
         assert!(header.flags.end_of_stream());
         assert_eq!(header.session_id, 7);
         assert!(payload.is_empty());
+    }
+
+    #[test]
+    fn an_encrypted_end_of_stream_marker_is_parseable() {
+        // Regression: a header-only datagram with ENCRYPTED set is rejected by
+        // parse_header as MissingAeadTag, so in a release build the marker was
+        // silently dropped and receivers waited out their jitter buffer on
+        // sudden silence — exactly what the marker exists to prevent. An
+        // unauthenticated EOS is also forgeable, which would let anyone on the
+        // venue network silence every performer.
+        let mut builder = PacketBuilder::new(7, 48_000, 240);
+        let datagram = builder.end_of_stream(true).to_vec();
+
+        let (header, payload) = parse_header(&datagram)
+            .expect("an encrypted end-of-stream marker must parse");
+        assert!(header.flags.end_of_stream());
+        assert!(header.flags.encrypted());
+        assert_eq!(
+            payload.len(),
+            AEAD_TAG_BYTES,
+            "the tag region must be reserved for the transport to seal into"
+        );
+    }
+
+    #[test]
+    fn an_encrypted_packet_reserves_room_for_the_aead_tag() {
+        // The packetiser does not hold key material, so it cannot seal. What it
+        // must do is hand the transport a datagram already the right size, with
+        // the tag region reserved — otherwise the transport has nowhere to put
+        // the tag and the packet is unparseable.
+        let stats = PacketiserStats::default();
+        let mut builder = PacketBuilder::new(1, 48_000, 240);
+        let (_producer, mut consumer) = ring_with(&[0.5; 240]);
+
+        let datagram = builder
+            .next_packet(&mut consumer, &stats, true)
+            .unwrap()
+            .to_vec();
+
+        assert_eq!(datagram.len(), HEADER_BYTES + 480 + AEAD_TAG_BYTES);
+        let (header, payload) = parse_header(&datagram).unwrap();
+        assert!(header.flags.encrypted());
+        assert_eq!(payload.len(), 480 + AEAD_TAG_BYTES);
+    }
+
+    #[test]
+    fn a_plaintext_packet_carries_no_tag_region() {
+        let stats = PacketiserStats::default();
+        let mut builder = PacketBuilder::new(1, 48_000, 240);
+        let (_producer, mut consumer) = ring_with(&[0.5; 240]);
+
+        let datagram = builder
+            .next_packet(&mut consumer, &stats, false)
+            .unwrap()
+            .to_vec();
+        assert_eq!(datagram.len(), HEADER_BYTES + 480);
     }
 
     #[test]

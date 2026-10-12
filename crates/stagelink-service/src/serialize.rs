@@ -112,14 +112,21 @@ pub fn audio_levels(snapshot: &audio_core::LevelSnapshot, at: i64) -> Value {
     })
 }
 
-/// Network status, as `networkStatusSchema`.
+/// The address receivers should be pointed at, or `None` if there is not one.
+///
+/// Requires the selected adapter to still be **present**, which is why it is
+/// not simply `settings.network.bind_address`: a persisted address whose
+/// adapter has since been unplugged or disabled is worse than no address, since
+/// it produces a join QR that every device fails to connect to. Every caller
+/// that needs "where do receivers connect" must come through here, or the
+/// answer differs depending on who asked.
 #[must_use]
-pub fn network_status(
+pub fn selected_address(
     adapters: &[NetworkAdapter],
     selected_adapter_id: Option<&str>,
     settings: &AppSettings,
-) -> Value {
-    let selected_address = selected_adapter_id
+) -> Option<String> {
+    selected_adapter_id
         .and_then(|id| adapters.iter().find(|adapter| adapter.id == id))
         .and_then(|adapter| {
             settings
@@ -127,7 +134,17 @@ pub fn network_status(
                 .bind_address
                 .clone()
                 .or_else(|| adapter.primary_ipv4().map(|info| info.address.clone()))
-        });
+        })
+}
+
+/// Network status, as `networkStatusSchema`.
+#[must_use]
+pub fn network_status(
+    adapters: &[NetworkAdapter],
+    selected_adapter_id: Option<&str>,
+    settings: &AppSettings,
+) -> Value {
+    let selected_address = selected_address(adapters, selected_adapter_id, settings);
 
     json!({
         "adapters": adapters.iter().map(adapter_json).collect::<Vec<_>>(),
@@ -216,11 +233,11 @@ pub fn session_record(record: &SessionRecord) -> Value {
 pub fn roster_entry(entry: &RosterEntry) -> Value {
     json!({
         "id": entry.receiver_id,
-        "deviceName": entry.receiver_id,
-        "displayName": Value::Null,
-        "platform": "unknown",
-        "platformVersion": Value::Null,
-        "appVersion": Value::Null,
+        "deviceName": entry.identity.device_name,
+        "displayName": entry.display_name,
+        "platform": entry.identity.platform.as_wire(),
+        "platformVersion": entry.identity.platform_version,
+        "appVersion": entry.identity.app_version,
         "ipAddress": entry.ip_address,
         "connectionState": entry.connection_state,
         // A receiver in the roster got there by presenting a valid join code,
@@ -241,26 +258,26 @@ pub fn roster_entry(entry: &RosterEntry) -> Value {
             "jitterMs": telemetry.jitter_ms,
             "bufferHealthMs": telemetry.buffer_health_ms,
             "underruns": telemetry.underruns,
-            "playbackState": "unknown",
-            "outputLatencyMs": Value::Null,
+            "playbackState": telemetry.playback_state.as_wire(),
+            "outputLatencyMs": telemetry.output_latency_ms,
+            "resampleRatioPpm": telemetry.resample_ratio_ppm,
         })),
     })
 }
 
 /// A join code, as `joinCodeSchema`.
+///
+/// `host` is the address the code was minted for, carried with the code rather
+/// than re-derived: what the operator is holding up must keep saying what it
+/// said when it was scanned, and re-deriving could silently change it.
 #[must_use]
-pub fn join_code(code: &JoinCode, settings: &AppSettings) -> Value {
-    let host = settings
-        .network
-        .bind_address
-        .clone()
-        .unwrap_or_default();
+pub fn join_code(code: &JoinCode, host: &str, settings: &AppSettings) -> Value {
     let control_port = settings.network.control_port;
     let stream_port = settings.network.stream_port;
 
     json!({
         "token": code.token,
-        "qrPayload": code.qr_payload(&host, control_port, stream_port, CONTROL_PROTOCOL_VERSION),
+        "qrPayload": code.qr_payload(host, control_port, stream_port, CONTROL_PROTOCOL_VERSION),
         "host": host,
         "controlPort": control_port,
         "streamPort": stream_port,

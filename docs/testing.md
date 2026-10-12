@@ -8,14 +8,14 @@ someone's ears.
 
 | Layer | Count | Needs hardware? |
 | --- | --- | --- |
-| Rust unit and integration | 326 | Mostly no — see below |
-| `@stagelink/shared-protocol` | 38 | No |
-| Electron / desktop | 56 | No |
-| Cross-implementation protocol | 13 | No (spawns the Rust probe) |
-| **Total automated** | **433** | |
-| Desktop smoke test | 38 checks | Launches the real app |
+| Rust unit and integration | 352 | Mostly no — see below |
+| `@stagelink/shared-protocol` | 43 | No |
+| Electron / desktop | 62 | No |
+| Cross-implementation protocol | 22 | No (spawns the Rust probe) |
+| **Total automated** | **479** | |
+| Desktop smoke test | 44 checks | Launches the real app |
 | Physical audio verification | manual | **Yes** |
-| Multi-receiver streaming | manual | **Yes, and Phase 3** |
+| Multi-receiver streaming | manual | **Yes, and Phases 3 + 5** |
 
 ## Running everything
 
@@ -123,6 +123,10 @@ asserts that the whole stack came up:
 - the Rust service reached `ready` and agrees on the protocol version,
 - real device and adapter lists arrived **through the bridge**,
 - the receiver list is empty rather than populated with demo devices,
+- the join QR renders as locally generated inline SVG,
+- the stores the UI reads agree with the service they read from — a panel
+  saying "no adapter selected" while the service has one is how a stale store
+  looks to an operator, and it is indistinguishable from lost settings,
 - icons render from bundled data URIs, not from the network,
 - an unregistered method is refused,
 - client-side routing works on every page.
@@ -138,7 +142,12 @@ Both modes matter. Several bugs found during development only appeared in one:
 - `if (!isDevelopment)` missing its parentheses — protocol handler never
   registered, **prod only**, invisible to the typechecker;
 - icons fetched from `api.iconify.design` — would fail on an isolated venue
-  network, which is the *only* network that matters.
+  network, which is the *only* network that matters;
+- the bridge plugin providing `$stagelink` by *returning* it, so every startup
+  store load failed with SERVICE_UNAVAILABLE and the UI showed its unconfigured
+  empty states on first launch — dev and prod, invisible to 59 passing unit
+  tests because none of them went through the plugin. Now also guarded by
+  `test/plugin-startup.test.ts`.
 
 ## What is not yet testable
 
@@ -148,7 +157,7 @@ Honest list, so nobody mistakes a green suite for a working monitor system:
 | --- | --- |
 | Real audio is captured and metered | **Verified** on real hardware |
 | Audio packets reach a receiver | **Not verified.** The packetiser and receive path are tested; the UDP sender is Phase 3 |
-| Multiple concurrent receivers | **Not verified.** Phase 3 |
+| Multiple concurrent receivers | **Not verified.** Needs the UDP sender (Phase 3) and the control server (Phase 5) |
 | Receiver pairing and authorisation | **Not verified.** Phase 5 |
 | Encrypted audio transport | **Not verified.** Phase 5 |
 | End-to-end latency | **Not measurable in software.** See [`latency-measurement.md`](latency-measurement.md) |

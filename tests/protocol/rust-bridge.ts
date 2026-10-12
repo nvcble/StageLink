@@ -160,3 +160,17 @@ export async function sequenceDeltaRust(previous: number, current: number): Prom
   const { value } = await ask<{ value: number }>({ q: 'sequenceDelta', previous, current })
   return value
 }
+
+/**
+ * A roster entry as the Rust serialiser emits it, for validation against
+ * `receiverSchema`. The entry is a fixture inside the probe; the application's
+ * own roster is empty until a device joins.
+ */
+export function rustRosterEntry(withTelemetry = true): Promise<Record<string, unknown>> {
+  return ask<Record<string, unknown>>({ q: 'rosterEntryShape', withTelemetry })
+}
+
+export async function aeadNonceRust(sessionId: number, sequence: number): Promise<number[]> {
+  const { bytes } = await ask<{ bytes: number[] }>({ q: 'aeadNonce', sessionId, sequence })
+  return bytes
+}

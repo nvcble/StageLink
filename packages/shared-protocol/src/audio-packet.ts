@@ -3,8 +3,10 @@
  *
  * This is the only part of StageLink that is not JSON. It is defined here as
  * well as in `crates/audio-protocol` because StageLink Mobile needs an
- * authoritative, language-neutral description; `docs/protocol/audio-packets.md`
- * is generated from these constants so the two can never drift silently.
+ * authoritative, language-neutral description. `docs/protocol/audio-packets.md`
+ * is the prose version of these constants — hand-written, not generated, so a
+ * change here needs a change there. `tests/protocol` catches drift between the
+ * two *implementations*; nothing catches drift from the document.
  *
  * Layout — 24-byte header, little-endian, followed by the payload:
  *
@@ -28,10 +30,10 @@
  * associated data so it still cannot be tampered with undetected.
  *
  * On the encrypted transport the payload is
- * `ChaCha20-Poly1305(key, nonce, plaintext, aad = header)` where the nonce is
- * derived from `sessionId || sequence`, and a 16-byte authentication tag is
- * appended. Keys are per-session and derived during the paired control-channel
- * handshake; they never appear in a datagram.
+ * `ChaCha20-Poly1305(key, nonce, plaintext, aad = header)` with a 16-byte
+ * authentication tag appended, and the nonce built by {@link aeadNonce}. Keys
+ * are per-session and derived during the paired control-channel handshake; they
+ * never appear in a datagram.
  */
 
 export const PACKET_MAGIC = 'SLNK' as const
@@ -109,4 +111,47 @@ export function sequenceDelta(previous: number, current: number): number {
   if (delta < 0) delta += span
   // Treat the upper half of the space as "behind" rather than a huge jump.
   return delta > span / 2 ? delta - span : delta
+}
+
+/** Nonce length for ChaCha20-Poly1305 (the IETF 96-bit variant). */
+export const AEAD_NONCE_BYTES = 12 as const
+
+/**
+ * The AEAD nonce for one packet, byte-exactly.
+ *
+ * ```
+ *  offset size contents
+ *  ------ ---- --------------------------------
+ *       0    4 zero (reserved for a future epoch field)
+ *       4    4 sessionId, little-endian
+ *       8    4 sequence,  little-endian
+ * ```
+ *
+ * Nonce reuse under ChaCha20-Poly1305 is catastrophic rather than merely weak:
+ * it leaks the XOR of two plaintexts and allows the Poly1305 key to be
+ * recovered, which means forged packets — injected audio in a performer's ears.
+ * So uniqueness is argued explicitly, and the argument rests on the key, not on
+ * this function:
+ *
+ * - Each session derives its own key via `HKDF-SHA256(ikm = control-channel
+ *   shared secret, salt = sessionId_le, info = "stagelink audio v1")`, so a
+ *   nonce only has to be unique *within* a session.
+ * - `sequence` provides that, incrementing by one per packet. It wraps at 2^32,
+ *   which at 200 packets/second is 248 days of continuous streaming; a sender
+ *   reaching the wrap must take a fresh key rather than continue.
+ * - `sessionId` is in the nonce so an accidental sequence restart cannot
+ *   collide with the previous session's packets. It is a *truncated*
+ *   identifier and may repeat, so it is not itself a guarantee.
+ *
+ * Mirrors `audio_protocol::aead_nonce`; `tests/protocol` pins them together.
+ */
+export function aeadNonce(sessionId: number, sequence: number): Uint8Array {
+  const nonce = new Uint8Array(AEAD_NONCE_BYTES)
+  const view = new DataView(nonce.buffer)
+  // `>>> 0` so a value past 2^31 that arrived as a negative number from a
+  // bitwise-derived source is written as the unsigned sessionId the sender
+  // used, rather than relying on the reader to know ToUint32 coercion.
+  view.setUint32(4, sessionId >>> 0, true)
+  view.setUint32(8, sequence >>> 0, true)
+  return nonce
 }

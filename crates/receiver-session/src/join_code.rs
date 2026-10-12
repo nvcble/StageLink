@@ -58,7 +58,7 @@ impl JoinCode {
     ///
     /// Compared in constant time so a wrong token leaks nothing about the right
     /// one. This is the check the control server performs when a receiver
-    /// connects (Phase 3/5).
+    /// connects (Phase 5).
     #[must_use]
     pub fn accepts(&self, presented: &str, now_ms: i64) -> bool {
         self.is_valid(now_ms) && constant_time_eq(&self.token, presented)

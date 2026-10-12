@@ -6,9 +6,11 @@ import {
   EVENT_NAMES,
   METHODS,
   METHOD_NAMES,
+  ServiceErrorCode,
   isBridgeErrorPayload,
   isEventName,
   isMethodName,
+  toServiceError,
 } from '@stagelink/shared-protocol'
 
 /**
@@ -170,6 +172,40 @@ describe('event registry as a whitelist', () => {
     // change added such an event, this would catch it.
     for (const name of EVENT_NAMES) {
       expect(name).not.toMatch(/sample|pcm|buffer|frame(s)?$/i)
+    }
+  })
+})
+
+describe('phase errors survive to the renderer', () => {
+  it('accepts NOT_IMPLEMENTED as a declared code', () => {
+    // Regression: NOT_IMPLEMENTED was emitted by the service but absent from
+    // the enum, so toServiceError failed its parse and rewrote it as
+    // INTERNAL / "Unknown error". Every Phase-3/5 method was mislabelled in
+    // the UI, and the invariant that unimplemented work names its phase was
+    // broken at the bridge. Nothing asserted it through the bridge, only over
+    // the pipe, so it went unnoticed.
+    const fromService = {
+      code: 'NOT_IMPLEMENTED',
+      message: 'stream.start is not available in this build.',
+      detail: 'Scheduled for Phase 3 (audio streaming).',
+      retryable: false,
+    }
+
+    const crossed = toServiceError(fromService)
+    expect(crossed.code).toBe('NOT_IMPLEMENTED')
+    expect(crossed.detail).toContain('Phase 3')
+    expect(crossed.message).toContain('not available in this build')
+  })
+
+  it('still collapses a genuinely unknown shape to INTERNAL', () => {
+    expect(toServiceError({ nonsense: true }).code).toBe('INTERNAL')
+    expect(toServiceError('a bare string').code).toBe('INTERNAL')
+  })
+
+  it('preserves every declared code across the boundary', () => {
+    for (const code of Object.values(ServiceErrorCode)) {
+      const crossed = toServiceError({ code, message: 'x', retryable: false })
+      expect(crossed.code, `${code} must survive`).toBe(code)
     }
   })
 })

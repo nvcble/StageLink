@@ -1,5 +1,6 @@
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import {
+  AEAD_NONCE_BYTES,
   AUDIO_PROTOCOL_VERSION,
   CONTROL_PROTOCOL_VERSION,
   METHODS,
@@ -9,6 +10,7 @@ import {
   SESSION_TRANSITIONS,
   SUPPORTED_FRAME_DURATIONS_MS,
   ServiceErrorCode,
+  aeadNonce,
   frameDurationSchema,
   canTransition,
   checkControlCompatibility,
@@ -228,6 +230,44 @@ describe('audio packet geometry', () => {
   })
 })
 
+describe('AEAD nonce', () => {
+  // The vectors published in docs/protocol/audio-packets.md, written out byte
+  // by byte rather than recomputed: a receiver that disagrees with these
+  // decrypts nothing at all, so the expectation must not share arithmetic with
+  // the code under test.
+  it('matches the published test vectors', () => {
+    expect([...aeadNonce(0x0000_5eed, 0)]).toEqual([
+      0x00, 0x00, 0x00, 0x00, 0xed, 0x5e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ])
+    expect([...aeadNonce(0x1234_5678, 0xffff_ffff)]).toEqual([
+      0x00, 0x00, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12, 0xff, 0xff, 0xff, 0xff,
+    ])
+  })
+
+  it('is 12 bytes, as ChaCha20-Poly1305 requires', () => {
+    expect(AEAD_NONCE_BYTES).toBe(12)
+    expect(aeadNonce(1, 1)).toHaveLength(12)
+  })
+
+  it('never repeats within a session', () => {
+    const seen = new Set<string>()
+    for (let sequence = 0; sequence < 1_000; sequence += 1) {
+      seen.add(aeadNonce(7, sequence).join(','))
+    }
+    expect(seen.size).toBe(1_000)
+    // And a sequence restart in a new session cannot collide with the old one.
+    expect(aeadNonce(7, 0)).not.toEqual(aeadNonce(8, 0))
+  })
+
+  it('treats a high sessionId or sequence as unsigned', () => {
+    // A value past 2^31 read with a bitwise operator arrives negative; it must
+    // still produce the nonce the sender used.
+    expect(aeadNonce(0x8000_0001 | 0, 0x8000_0001 | 0)).toEqual(
+      aeadNonce(0x8000_0001, 0x8000_0001),
+    )
+  })
+})
+
 describe('transport policy', () => {
   it('refuses plaintext audio in production', () => {
     expect(isTransportAllowedInProduction('udp-plaintext')).toBe(false)
@@ -320,6 +360,9 @@ describe('receiver telemetry labelling', () => {
       outputLatencyMs: null,
     })
     expect(parsed.success).toBe(true)
+    // A receiver that predates `resampleRatioPpm` is still accepted, per the
+    // protocol's own rule that a differing MINOR is tolerated.
+    expect(parsed.success && parsed.data.resampleRatioPpm).toBeNull()
     // The discriminator cannot be forged into something that looks measured.
     expect(
       receiverTelemetrySchema.safeParse({ source: 'measured', receivedAt: 1 }).success,

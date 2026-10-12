@@ -21,9 +21,9 @@ pub mod packet;
 pub mod transport;
 
 pub use packet::{
-    AEAD_TAG_BYTES, AudioPacketHeader, HEADER_BYTES, MAX_PAYLOAD_BYTES, PACKET_MAGIC,
-    PacketError, PacketFlags, PayloadFormat, datagram_bytes, encode_header, fits_in_mtu,
-    parse_header, sequence_delta,
+    AEAD_NONCE_BYTES, AEAD_TAG_BYTES, AudioPacketHeader, HEADER_BYTES, MAX_PAYLOAD_BYTES,
+    PACKET_MAGIC, PacketError, PacketFlags, PayloadFormat, aead_nonce, datagram_bytes,
+    encode_header, fits_in_mtu, parse_header, sequence_delta,
 };
 pub use transport::{SequenceTracker, SequenceVerdict, TransportKind};
 

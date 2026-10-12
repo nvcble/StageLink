@@ -76,6 +76,17 @@ export const receiverTelemetrySchema = z.object({
   playbackState: playbackStateSchema,
   /** Receiver's own estimate of its output-path latency, if it can measure it. */
   outputLatencyMs: z.number().min(0).nullable(),
+  /**
+   * Where the receiver's drift resampler has settled, in parts per million.
+   * Null if it does not compensate for drift. Carried through to the UI
+   * because a value pinned at its clamp is the only field that reveals clock
+   * drift exceeding budget before somebody complains about a dropout.
+   *
+   * Defaulted rather than required: the protocol's compatibility rule is that a
+   * differing MINOR is tolerated, so a receiver built before this field existed
+   * must still have its report accepted.
+   */
+  resampleRatioPpm: z.number().nullable().default(null),
 })
 
 export type ReceiverTelemetry = z.infer<typeof receiverTelemetrySchema>
@@ -178,6 +189,67 @@ export const receiverIdParamsSchema = z.object({
   receiverId: z.string().min(1),
 })
 export type ReceiverIdParams = z.infer<typeof receiverIdParamsSchema>
+
+// ---------------------------------------------------------------------------
+// Receiver -> desktop
+// ---------------------------------------------------------------------------
+
+/**
+ * These two are the only methods a *receiver* calls on the desktop. They are
+ * requests rather than events on purpose: events are server-to-client only and
+ * the control server discards client-sent events by design, so the shape
+ * documented previously could never have worked.
+ *
+ * Making the heartbeat a request also means the ack doubles as liveness
+ * confirmation and gives the receiver its round-trip time from one frame.
+ */
+
+export const receiverHeartbeatParamsSchema = z.object({
+  /** Receiver clock time when it sent this, echoed back so it can derive RTT. */
+  sentAt: z.number().int(),
+})
+export type ReceiverHeartbeatParams = z.infer<typeof receiverHeartbeatParamsSchema>
+
+export const receiverHeartbeatResultSchema = z.object({
+  /** Desktop clock time when the heartbeat was accepted. */
+  at: z.number().int(),
+  /** Echo of `sentAt`, so RTT needs no local bookkeeping. */
+  sentAt: z.number().int(),
+  /** Miss this deadline this many times and the desktop stops sending audio. */
+  missLimit: z.number().int().min(1),
+})
+export type ReceiverHeartbeatResult = z.infer<typeof receiverHeartbeatResultSchema>
+
+/**
+ * A quality report. Every field is the receiver's own claim — `source` and
+ * `receivedAt` are stamped by the desktop on arrival, not sent, so a receiver
+ * cannot forge its own provenance.
+ */
+export const receiverTelemetryParamsSchema = z.object({
+  reportedAt: z.number().int(),
+  packetsReceived: z.number().int().min(0),
+  packetsLost: z.number().int().min(0),
+  lossPercent: z.number().min(0).max(100),
+  jitterMs: z.number().min(0),
+  bufferHealthMs: z.number().min(0),
+  underruns: z.number().int().min(0),
+  playbackState: playbackStateSchema,
+  outputLatencyMs: z.number().min(0).nullable(),
+  /**
+   * Resampler ratio the drift controller has settled on, in parts per million.
+   * A value pinned at the clamp for minutes means clock drift exceeds budget —
+   * the one figure that reveals it from the field rather than from a complaint.
+   *
+   * Null, or absent, if the receiver does not compensate for drift.
+   */
+  resampleRatioPpm: z.number().nullable().default(null),
+})
+export type ReceiverTelemetryParams = z.infer<typeof receiverTelemetryParamsSchema>
+
+export const receiverTelemetryResultSchema = z.object({
+  accepted: z.boolean(),
+})
+export type ReceiverTelemetryResult = z.infer<typeof receiverTelemetryResultSchema>
 
 export const renameReceiverParamsSchema = z.object({
   receiverId: z.string().min(1),

@@ -2,12 +2,19 @@
 
 ## The honest position
 
-StageLink's **design target** is roughly 15–30 ms from this desktop to a wired
-earphone under favourable conditions.
+StageLink's **design target** is 40–90 ms from this desktop to a wired earphone
+on Android, under favourable conditions.
 
 That is a target, not a measurement, and this document exists because the
 difference matters. Nothing in the application reports an end-to-end latency
 figure, because the desktop genuinely cannot know one.
+
+> **Revised from 15–30 ms.** That earlier figure was not achievable and was
+> never measured. The desktop's own contribution is the small part of the
+> budget: a 10 ms capture buffer plus a 5 ms packet. The large parts are the
+> Android output path (20–40 ms with AAudio low-latency support, over 100 ms on
+> cheap hardware) and a jitter buffer deep enough to absorb real Wi-Fi arrival
+> spread. A target that ignored the two largest terms was not a target.
 
 ### What the desktop can measure
 

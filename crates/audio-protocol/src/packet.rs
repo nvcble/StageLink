@@ -263,6 +263,54 @@ pub fn sequence_delta(previous: u32, current: u32) -> i64 {
     if wrapped > SPAN / 2 { wrapped - SPAN } else { wrapped }
 }
 
+/// Nonce length for ChaCha20-Poly1305 (the IETF 96-bit variant).
+pub const AEAD_NONCE_BYTES: usize = 12;
+
+/// The AEAD nonce for one packet, byte-exactly.
+///
+/// ```text
+///  offset size contents
+///  ------ ---- --------------------------------
+///       0    4 zero
+///       4    4 sessionId, little-endian
+///       8    4 sequence,  little-endian
+/// ```
+///
+/// Four leading zero bytes rather than four trailing ones, so the varying part
+/// sits in the low-order half as it does in TLS and in every other
+/// counter-style construction a reviewer will have seen. The zeros are reserved
+/// for a future epoch field; a receiver must not require them to be zero beyond
+/// what this function produces.
+///
+/// # Why this must be specified down to the byte
+///
+/// Nonce reuse under ChaCha20-Poly1305 is catastrophic, not merely weak: two
+/// packets sealed with the same key and nonce leak the XOR of their plaintexts
+/// and, far worse, allow the Poly1305 key to be recovered and arbitrary packets
+/// forged. A forged packet here means injected audio in a performer's ears. So
+/// the uniqueness argument has to be explicit:
+///
+/// * `sequence` is unique within a session, and increments by exactly one.
+/// * It wraps at 2^32. At the default 200 packets/second that is **248 days**
+///   of continuous streaming, so it cannot happen inside a service — but the
+///   sender must not rely on that. A session that reaches the wrap must take a
+///   fresh key.
+/// * `sessionId` separates sessions, but it is a *truncated* identifier and
+///   therefore may repeat. It is in the nonce to keep an accidental sequence
+///   restart from colliding, **not** as the uniqueness guarantee.
+///
+/// The actual guarantee is the key: each session derives its own via
+/// `HKDF-SHA256(ikm = control-channel shared secret, salt = sessionId_le,
+/// info = "stagelink audio v1")`. One key per session means a nonce need only
+/// be unique within a session, which `sequence` delivers.
+#[must_use]
+pub fn aead_nonce(session_id: u32, sequence: u32) -> [u8; AEAD_NONCE_BYTES] {
+    let mut nonce = [0u8; AEAD_NONCE_BYTES];
+    nonce[4..8].copy_from_slice(&session_id.to_le_bytes());
+    nonce[8..12].copy_from_slice(&sequence.to_le_bytes());
+    nonce
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +448,38 @@ mod tests {
         let mut datagram = vec![0_u8; HEADER_BYTES + AEAD_TAG_BYTES + 7];
         encode_header(&header, &mut datagram).unwrap();
         assert!(parse_header(&datagram).is_ok());
+    }
+
+    /// The two vectors in `docs/protocol/audio-packets.md`. A receiver that
+    /// disagrees with these cannot decrypt a single packet, so they are
+    /// written out byte by byte rather than recomputed from the function
+    /// under test.
+    #[test]
+    fn the_aead_nonce_matches_the_published_test_vectors() {
+        assert_eq!(
+            aead_nonce(0x0000_5EED, 0),
+            [0x00, 0x00, 0x00, 0x00, 0xED, 0x5E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
+        assert_eq!(
+            aead_nonce(0x1234_5678, 0xFFFF_FFFF),
+            [0x00, 0x00, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12, 0xFF, 0xFF, 0xFF, 0xFF]
+        );
+    }
+
+    #[test]
+    fn consecutive_packets_in_a_session_never_share_a_nonce() {
+        let session = 7;
+        let mut seen = std::collections::HashSet::new();
+        for sequence in 0..1_000 {
+            assert!(
+                seen.insert(aead_nonce(session, sequence)),
+                "sequence {sequence} reused a nonce"
+            );
+        }
+        // And the sequence is what varies, not the session: the same sequence
+        // in a different session must also differ, so an accidental sequence
+        // restart cannot collide with the previous session's packets.
+        assert_ne!(aead_nonce(7, 0), aead_nonce(8, 0));
     }
 
     #[test]

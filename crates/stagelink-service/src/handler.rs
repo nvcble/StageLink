@@ -47,6 +47,8 @@ pub const DISPATCHED_METHODS: &[&str] = &[
     "receivers.disconnect",
     "receivers.revoke",
     "receivers.createJoinCode",
+    "receiver.heartbeat",
+    "receiver.telemetry",
     "network.getStatus",
     "network.selectAdapter",
     "network.checkFirewall",
@@ -312,8 +314,14 @@ impl StageLinkHandler {
 
     // -- network -----------------------------------------------------------
 
-    async fn network_get_status(&self) -> Result<Value, ServiceErrorPayload> {
-        let adapters = tokio::task::spawn_blocking(device_discovery::adapters::enumerate_adapters)
+    /// Enumerates adapters off the async runtime.
+    ///
+    /// Blocking: the Windows call walks the whole adapter table, and doing that
+    /// on a runtime worker would stall every other control request behind it.
+    async fn enumerate_adapters(
+        &self,
+    ) -> Result<Vec<device_discovery::adapters::NetworkAdapter>, ServiceErrorPayload> {
+        tokio::task::spawn_blocking(device_discovery::adapters::enumerate_adapters)
             .await
             .map_err(|error| {
                 ServiceErrorPayload::new("INTERNAL", format!("adapter task failed: {error}"))
@@ -323,8 +331,11 @@ impl StageLinkHandler {
                     "NETWORK_ADAPTER_UNAVAILABLE",
                     format!("could not enumerate network adapters: {error}"),
                 )
-            })?;
+            })
+    }
 
+    async fn network_get_status(&self) -> Result<Value, ServiceErrorPayload> {
+        let adapters = self.enumerate_adapters().await?;
         let settings = self.state.settings_snapshot();
         let selected = self.state.selected_adapter.lock().clone();
         Ok(serialize::network_status(&adapters, selected.as_deref(), &settings))
@@ -503,11 +514,15 @@ impl StageLinkHandler {
     fn current_join_code(&self) -> Value {
         let now = now_ms();
         let mut held = self.state.join_code.lock();
-        if held.as_ref().is_some_and(|code| !code.is_valid(now)) {
+        if held.as_ref().is_some_and(|minted| !minted.code.is_valid(now)) {
             *held = None;
         }
         match held.as_ref() {
-            Some(code) => serialize::join_code(code, &self.state.settings_snapshot()),
+            Some(minted) => serialize::join_code(
+                &minted.code,
+                &minted.host,
+                &self.state.settings_snapshot(),
+            ),
             None => Value::Null,
         }
     }
@@ -516,28 +531,36 @@ impl StageLinkHandler {
     ///
     /// Rotation is the whole mechanism for "that QR got shared" — the old token
     /// stops working the moment this returns.
-    fn receivers_create_join_code(&self) -> Result<Value, ServiceErrorPayload> {
+    async fn receivers_create_join_code(&self) -> Result<Value, ServiceErrorPayload> {
         let settings = self.state.settings_snapshot();
 
-        // Without a bound address there is nothing to put in the QR, and a code
-        // pointing nowhere would just produce devices that fail to join.
-        if settings.network.bind_address.is_none() {
-            return Err(ServiceErrorPayload::new(
-                "NETWORK_ADAPTER_UNAVAILABLE",
-                "Choose a streaming network adapter before creating a join code.",
-            )
-            .with_detail(
-                "Receivers need an address to connect to. Pick the adapter facing your access \
-                 point on the Network page.",
-            ));
-        }
+        // The address has to come from an adapter that is *present*, through
+        // the same derivation the Network page uses. Gating on the persisted
+        // `bind_address` alone was wrong in both directions: it minted codes
+        // the join panel then refused to display, and it would have put the
+        // address of an unplugged adapter into a QR that every device fails to
+        // connect to.
+        let adapters = self.enumerate_adapters().await?;
+        let selected = self.state.selected_adapter.lock().clone();
+        let host = serialize::selected_address(&adapters, selected.as_deref(), &settings)
+            .ok_or_else(|| {
+                ServiceErrorPayload::new(
+                    "NETWORK_ADAPTER_UNAVAILABLE",
+                    "Choose a streaming network adapter before creating a join code.",
+                )
+                .with_detail(
+                    "Receivers need an address to connect to. Pick the adapter facing your \
+                     access point on the Network page.",
+                )
+            })?;
 
         let code = receiver_session::JoinCode::mint(
             now_ms(),
             receiver_session::join_code::DEFAULT_TTL_MS,
         );
-        let payload = serialize::join_code(&code, &settings);
-        *self.state.join_code.lock() = Some(code);
+        let payload = serialize::join_code(&code, &host, &settings);
+        *self.state.join_code.lock() =
+            Some(crate::state::MintedJoinCode { code, host });
 
         // Push it so any other view of the QR updates rather than showing a
         // code that has just been invalidated.
@@ -610,12 +633,27 @@ impl ControlHandler for StageLinkHandler {
 
             // receivers
             "receivers.list" => self.receivers_list(),
-            "receivers.createJoinCode" => self.receivers_create_join_code(),
+            "receivers.createJoinCode" => self.receivers_create_join_code().await,
             // These act on a receiver that has joined, which needs the control
             // server. Minting the code is local and works today; accepting a
             // connection does not.
             "receivers.rename" | "receivers.disconnect" | "receivers.revoke" => {
-                Err(Self::not_implemented(method, "Phase 3 (receiver connections)"))
+                Err(Self::not_implemented(method, "Phase 5 (receiver connections)"))
+            }
+
+            // Called by a receiver, not by the desktop UI. They arrive on the
+            // control server, which does not exist yet, so right now they are
+            // reachable only over the local pipe where no receiver can be.
+            //
+            // **They must stay refused on this path when the control server
+            // lands.** A heartbeat or a telemetry report only means anything
+            // attributed to an admitted receiver, and a pipe client has no
+            // receiver identity — honouring one here would let the renderer
+            // keep a phantom device alive in the roster, or write quality
+            // figures no device reported. The control server implements them
+            // against the connection's own identity; this arm does not.
+            "receiver.heartbeat" | "receiver.telemetry" => {
+                Err(Self::not_implemented(method, "Phase 5 (receiver connections)"))
             }
 
             // streaming
@@ -702,6 +740,37 @@ mod tests {
             std::env::temp_dir().join(format!("stagelink-handler-{}", uuid::Uuid::new_v4()));
         let secrets = SecretStore::new(&directory).unwrap();
         StageLinkHandler::new(ServiceState::new(database, secrets, false))
+    }
+
+    /// Selects the first adapter that could really carry a stream, returning
+    /// the address the service bound to.
+    ///
+    /// `None` means this machine has no usable adapter, in which case the
+    /// caller skips rather than asserting about hardware that is not there.
+    /// Nothing is stubbed: a join code's host must come from a real adapter,
+    /// and a test that invented one would not be testing that.
+    async fn select_a_usable_adapter(handler: &StageLinkHandler) -> Option<String> {
+        let status = handler.handle("network.getStatus", Value::Null).await.ok()?;
+        for adapter in status["adapters"].as_array()?.clone() {
+            let usable = adapter["isUp"] == true
+                && adapter["kind"] != "loopback"
+                && adapter["addresses"]
+                    .as_array()
+                    .is_some_and(|list| list.iter().any(|entry| entry["family"] == "ipv4"));
+            if !usable {
+                continue;
+            }
+            if let Ok(updated) = handler
+                .handle(
+                    "network.selectAdapter",
+                    json!({ "adapterId": adapter["id"] }),
+                )
+                .await
+            {
+                return updated["selectedAddress"].as_str().map(ToOwned::to_owned);
+            }
+        }
+        None
     }
 
     #[tokio::test]
@@ -874,8 +943,15 @@ mod tests {
         assert!(error.detail.unwrap().contains("Network page"));
     }
 
+    /// The defect the desktop smoke test caught: minting used to need only a
+    /// persisted `bindAddress`, while every other part of the system — the
+    /// Network page, the join panel's own gate — asks whether an adapter is
+    /// selected. The result was a real token the operator could never see,
+    /// behind a warning telling them to do something they appeared to have
+    /// done. Worse, the address could belong to an adapter that had since been
+    /// unplugged, producing a QR nothing can connect to.
     #[tokio::test]
-    async fn a_minted_join_code_carries_a_scannable_payload() {
+    async fn an_address_without_a_selected_adapter_does_not_allow_minting() {
         let handler = handler();
         handler
             .handle(
@@ -884,6 +960,25 @@ mod tests {
             )
             .await
             .unwrap();
+
+        let error = handler
+            .handle("receivers.createJoinCode", Value::Null)
+            .await
+            .expect_err("an address alone is not a network selection");
+        assert_eq!(error.code, "NETWORK_ADAPTER_UNAVAILABLE");
+
+        // And the panel's view agrees, which is the whole point.
+        let status = handler.handle("network.getStatus", Value::Null).await.unwrap();
+        assert_eq!(status["selectedAddress"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn a_minted_join_code_carries_a_scannable_payload() {
+        let handler = handler();
+        let Some(address) = select_a_usable_adapter(&handler).await else {
+            eprintln!("skipping: no usable network adapter on this machine");
+            return;
+        };
 
         let code = handler
             .handle("receivers.createJoinCode", Value::Null)
@@ -892,26 +987,24 @@ mod tests {
 
         let payload = code["qrPayload"].as_str().unwrap();
         assert!(payload.starts_with("stagelink://join?"));
-        assert!(payload.contains("h=10.0.0.1"));
+        assert!(payload.contains(&format!("h={address}")), "got {payload}");
         assert!(payload.contains(code["token"].as_str().unwrap()));
-        assert_eq!(code["host"], "10.0.0.1");
+        assert_eq!(code["host"], address);
         assert!(code["expiresAt"].as_i64().unwrap() > code["issuedAt"].as_i64().unwrap());
 
         // And it is what receivers.list now reports.
         let list = handler.handle("receivers.list", Value::Null).await.unwrap();
         assert_eq!(list["joinCode"]["token"], code["token"]);
+        assert_eq!(list["joinCode"]["host"], address);
     }
 
     #[tokio::test]
     async fn rotating_replaces_the_previous_code() {
         let handler = handler();
-        handler
-            .handle(
-                "settings.update",
-                json!({ "network": { "bindAddress": "10.0.0.1" } }),
-            )
-            .await
-            .unwrap();
+        if select_a_usable_adapter(&handler).await.is_none() {
+            eprintln!("skipping: no usable network adapter on this machine");
+            return;
+        }
 
         let first = handler
             .handle("receivers.createJoinCode", Value::Null)

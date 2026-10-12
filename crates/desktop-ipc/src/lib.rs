@@ -30,7 +30,7 @@ pub mod security;
 #[cfg(windows)]
 pub mod server;
 
-pub use codec::{Envelope, EnvelopeKind, ServiceErrorPayload};
+pub use codec::{Envelope, EnvelopeKind, ReceiverIdentity, ServiceErrorPayload, StreamParams};
 pub use error::{IpcError, Result};
 pub use handler::{ControlHandler, EventSink};
 

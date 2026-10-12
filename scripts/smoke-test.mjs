@@ -340,6 +340,7 @@ async function main() {
           hasPanel: document.body.innerText.includes("Add a receiver"),
           statesAuthorisation: document.body.innerText.includes("Treat it like a key"),
           hasApprovalQueue: document.body.innerText.includes("Awaiting your approval"),
+          gatedOnAdapter: document.body.innerText.includes("Choose a streaming network adapter first"),
         })`),
       ),
     )
@@ -368,6 +369,42 @@ async function main() {
       ),
     )
 
+    // The join panel gates itself on the renderer's view of the network while
+    // minting gates on the service's. If those two disagree, one of them is
+    // showing the operator something untrue — a warning telling them to select
+    // an adapter they have selected, or a QR for an adapter that is gone.
+    const networkAgreement = JSON.parse(
+      String(
+        await cdp.evaluate(
+          'window.stagelink.invoke("network.getStatus")' +
+            '.then(s => JSON.stringify({ ok: true, adapter: s.selectedAdapterId, address: s.selectedAddress }))' +
+            '.catch(e => JSON.stringify({ ok: false, code: e.code }))',
+        ),
+      ),
+    )
+    // If a round trip through the Network page un-gates the panel, the panel
+    // was reading stale store state rather than disagreeing about policy.
+    await navigate(cdp, '/network')
+    await delay(900)
+    await navigate(cdp, '/receivers')
+    await delay(900)
+    const afterNetworkVisit = await cdp.evaluate(
+      'document.body.innerText.includes("Choose a streaming network adapter first")',
+    )
+    check(
+      'the join panel does not need the Network page to have been visited first',
+      afterNetworkVisit === joinReport.gatedOnAdapter,
+      JSON.stringify({ gatedOnFirstVisit: joinReport.gatedOnAdapter, afterNetworkVisit }),
+    )
+
+    check(
+      'the service and the join panel agree on whether a network is configured',
+      networkAgreement.ok &&
+        (networkAgreement.address !== null) === mint.ok &&
+        (networkAgreement.address !== null) !== joinReport.gatedOnAdapter,
+      JSON.stringify({ networkAgreement, minted: mint.ok, gated: joinReport.gatedOnAdapter }),
+    )
+
     if (mint.ok) {
       check(
         'a minted join code carries a scannable payload',
@@ -382,11 +419,19 @@ async function main() {
         String(
           await cdp.evaluate(`(() => {
             const svg = document.querySelector("svg[viewBox]")
+            const text = document.body.innerText
             return JSON.stringify({
               rendered: svg !== null,
               shapes: svg ? svg.querySelectorAll("path, rect").length : 0,
               remote: document.body.innerHTML.includes("api.qrserver") ||
                       document.body.innerHTML.includes("chart.googleapis"),
+              // Why it is missing, when it is missing. A bare "rendered: false"
+              // cannot distinguish "the panel refused to show a QR" from "the
+              // code never reached the store" from "the encoder threw", and
+              // those have nothing to do with each other.
+              stillGated: text.includes("Choose a streaming network adapter first"),
+              sawCountdown: text.includes("Expires in"),
+              sawExpired: text.includes("Expired"),
             })
           })()`),
         ),

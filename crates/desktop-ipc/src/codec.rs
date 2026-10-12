@@ -59,16 +59,53 @@ impl ServiceErrorPayload {
     }
 }
 
+/// A receiver's self-description, sent in its `hello`. Untrusted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceiverIdentity {
+    pub device_name: String,
+    pub platform: String,
+    pub platform_version: Option<String>,
+    pub app_version: Option<String>,
+    /// Long-term public key, hex. Not a secret.
+    pub public_key: String,
+}
+
+/// Audio parameters an admitted receiver needs.
+///
+/// The sample rate lives here and nowhere else — the packet header does not
+/// carry it, and a receiver that guessed wrong would play the mix sharp or flat
+/// in somebody's ears.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamParams {
+    pub session_id: u32,
+    pub sample_rate: u32,
+    pub frame_duration_ms: f64,
+    pub payload_format: String,
+    pub transport: String,
+    pub stream_port: u16,
+    pub frames_per_packet: u32,
+}
+
 /// The message kinds that travel on the control channel.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum EnvelopeKind {
     /// Client -> service: authenticate and declare a protocol version.
+    ///
+    /// A receiver joins with this same message: its join token goes in `token`
+    /// and its self-description in `receiver`. There is no separate join
+    /// method, because the envelope contract requires `hello` to be first and
+    /// to carry the credential.
     Hello {
         token: String,
         client: String,
         #[serde(rename = "controlProtocolVersion")]
         control_protocol_version: String,
+        /// Present only when a receiver is joining.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receiver: Option<ReceiverIdentity>,
     },
     /// Service -> client: handshake accepted.
     Welcome {
@@ -81,6 +118,16 @@ pub enum EnvelopeKind {
         #[serde(rename = "availableAudioApis")]
         available_audio_apis: Vec<String>,
         pid: u32,
+        /// Present only when a receiver was admitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream: Option<StreamParams>,
+        /// Fingerprint of the desktop's long-term key, for the receiver to pin.
+        #[serde(
+            default,
+            rename = "keyFingerprint",
+            skip_serializing_if = "Option::is_none"
+        )]
+        key_fingerprint: Option<String>,
     },
     Request {
         id: String,
@@ -227,6 +274,8 @@ mod tests {
             audio_protocol_version: 1,
             available_audio_apis: vec!["wasapi".into()],
             pid: 1234,
+            stream: None,
+            key_fingerprint: None,
         });
         let line = envelope.encode().unwrap();
         assert!(line.contains("\"kind\":\"welcome\""), "got {line}");
@@ -234,19 +283,78 @@ mod tests {
         assert!(line.contains("\"controlProtocolVersion\""));
         assert!(line.contains("\"audioProtocolVersion\""));
         assert!(line.contains("\"availableAudioApis\""));
+        // The receiver-only fields must vanish for the local client, whose
+        // schema has them optional — emitting explicit nulls would be a
+        // gratuitous difference between the two implementations.
+        assert!(!line.contains("\"stream\""), "got {line}");
+        assert!(!line.contains("\"keyFingerprint\""), "got {line}");
     }
 
     #[test]
     fn a_hello_decodes_from_the_typescript_wire_form() {
         let line = r#"{"v":1,"kind":"hello","token":"deadbeef","client":"stagelink-desktop/0.1.0","controlProtocolVersion":"1.0.0"}"#;
         match Envelope::decode(line).unwrap().kind {
-            EnvelopeKind::Hello { token, client, control_protocol_version } => {
+            EnvelopeKind::Hello { token, client, control_protocol_version, receiver } => {
                 assert_eq!(token, "deadbeef");
                 assert_eq!(client, "stagelink-desktop/0.1.0");
                 assert_eq!(control_protocol_version, "1.0.0");
+                assert!(receiver.is_none(), "the local client is not a receiver");
             }
             other => panic!("expected a hello, got {other:?}"),
         }
+    }
+
+    /// A receiver's join, which is a `hello` and not a separate method: the
+    /// envelope contract requires the first frame to carry the credential, so
+    /// a second credential-bearing frame could never be first.
+    #[test]
+    fn a_receiver_hello_round_trips_with_its_identity() {
+        let envelope = Envelope::new(EnvelopeKind::Hello {
+            token: "0".repeat(64),
+            client: "stagelink-mobile/0.1.0".into(),
+            control_protocol_version: "1.0.0".into(),
+            receiver: Some(ReceiverIdentity {
+                device_name: "Pixel 8".into(),
+                platform: "android".into(),
+                platform_version: Some("14".into()),
+                app_version: Some("0.1.0".into()),
+                public_key: "ab".repeat(32),
+            }),
+        });
+        let line = envelope.encode().unwrap();
+        assert!(line.contains("\"deviceName\":\"Pixel 8\""), "got {line}");
+        assert!(line.contains("\"platformVersion\""));
+        assert!(line.contains("\"publicKey\""));
+        assert_eq!(Envelope::decode(line.trim_end()).unwrap(), envelope);
+    }
+
+    /// The sample rate reaches a receiver only here. A `welcome` that carried
+    /// no rate would leave the receiver guessing, and guessing wrong means
+    /// playing the mix sharp or flat in a performer's ears.
+    #[test]
+    fn an_admitted_receivers_welcome_carries_the_stream_parameters() {
+        let envelope = Envelope::new(EnvelopeKind::Welcome {
+            service_version: "0.1.0".into(),
+            control_protocol_version: "1.0.0".into(),
+            audio_protocol_version: 1,
+            available_audio_apis: vec!["wasapi".into()],
+            pid: 1234,
+            stream: Some(StreamParams {
+                session_id: 0x5EED,
+                sample_rate: 48_000,
+                frame_duration_ms: 5.0,
+                payload_format: "pcm_s16le".into(),
+                transport: "udp-plaintext".into(),
+                stream_port: 45872,
+                frames_per_packet: 240,
+            }),
+            key_fingerprint: Some("fingerprint".into()),
+        });
+        let line = envelope.encode().unwrap();
+        assert!(line.contains("\"sampleRate\":48000"), "got {line}");
+        assert!(line.contains("\"framesPerPacket\":240"));
+        assert!(line.contains("\"keyFingerprint\":\"fingerprint\""));
+        assert_eq!(Envelope::decode(line.trim_end()).unwrap(), envelope);
     }
 
     #[test]

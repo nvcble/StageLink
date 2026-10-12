@@ -9,8 +9,8 @@
 //!
 //! The mDNS/DNS-SD advertiser in [`advertise`] defines the service type and
 //! TXT-record contract that StageLink Mobile will browse for. Publishing is
-//! Phase 3/5 work, and is gated behind an explicit call so a development build
-//! never announces itself on a venue network by accident.
+//! Phase 5 work, and will be gated behind an explicit call so a development
+//! build never announces itself on a venue network by accident.
 //!
 //! A standing design note: discovery is a *convenience*, never an authority. A
 //! receiver that finds the desktop by mDNS still has to pair and authenticate.

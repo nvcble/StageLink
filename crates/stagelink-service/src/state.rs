@@ -25,6 +25,18 @@ pub fn now_ms() -> i64 {
         .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
 }
 
+/// A minted join code together with the address it was minted for.
+///
+/// The host is kept with the code rather than looked up when the QR is drawn.
+/// An operator holding up a code on stage must be holding up what was actually
+/// issued; if the network selection changes underneath it, the honest outcome
+/// is a code that no longer matches the current adapter — visible on the
+/// Network page — not a QR that quietly rewrites itself to a new address.
+pub struct MintedJoinCode {
+    pub code: JoinCode,
+    pub host: String,
+}
+
 /// Service-wide state.
 pub struct ServiceState {
     pub started_at: Instant,
@@ -39,7 +51,7 @@ pub struct ServiceState {
     pub roster: Mutex<ReceiverRoster>,
     /// The join code currently encoded in the QR, if one has been minted.
     /// Replaced wholesale on rotation, so the previous token stops working.
-    pub join_code: Mutex<Option<JoinCode>>,
+    pub join_code: Mutex<Option<MintedJoinCode>>,
     pub system: SystemProbe,
     /// Network adapter chosen for streaming, mirrored from settings.
     pub selected_adapter: Mutex<Option<String>>,

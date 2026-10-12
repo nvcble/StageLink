@@ -36,12 +36,17 @@ export default defineNuxtPlugin({
         '[stagelink] window.stagelink is not available. This page is not running inside ' +
           'StageLink Core, so no audio hardware or service state is reachable.',
       )
-      return {
-        provide: {
-          stagelink: null as StageLinkBridge | null,
-        },
-      }
+      nuxtApp.provide('stagelink', null as StageLinkBridge | null)
+      return
     }
+
+    // Provided *before* anything below runs, not by returning it at the end.
+    // `useStageLinkBridge()` reads `$stagelink`, so a store action called
+    // during this setup would otherwise see `undefined` and fail with
+    // SERVICE_UNAVAILABLE — which is exactly what happened to the initial
+    // loads: every store stayed empty until some page refetched on mount, so a
+    // configured adapter and a chosen input looked unset on first launch.
+    nuxtApp.provide('stagelink', bridge as StageLinkBridge | null)
 
     const service = useServiceStore()
     const audio = useAudioStore()
@@ -53,6 +58,26 @@ export default defineNuxtPlugin({
     const diagnostics = useDiagnosticsStore()
 
     service.setRuntime(bridge.runtime)
+
+    /**
+     * Loads everything the shell needs, in the order it needs it.
+     *
+     * Called once at startup and again whenever the service becomes usable —
+     * after a crash and restart, or simply because the renderer won the race on
+     * first launch. `allSettled` because one unavailable store must not stop
+     * the others, and each action records its own error.
+     */
+    async function loadInitialState() {
+      // Settings first: other views read display preferences from them.
+      await settings.load()
+      await Promise.allSettled([
+        audio.refreshStatus(),
+        streaming.refreshStatus(),
+        network.refresh(),
+        session.refreshCurrent(),
+        receivers.refresh(),
+      ])
+    }
 
     // -- event subscriptions ----------------------------------------------
     // Every `on` returns an unsubscribe function; they are all collected so the
@@ -67,7 +92,17 @@ export default defineNuxtPlugin({
       bridge.on('session.state', (payload) => session.applySession(payload)),
       bridge.on('session.event', (payload) => session.appendEvent(payload)),
       bridge.on('diagnostics.snapshot', (payload) => diagnostics.applySnapshot(payload)),
-      bridge.on('service.state', (payload) => service.applyInfo(payload)),
+      bridge.on('service.state', (payload) => {
+        const wasUsable = service.isUsable
+        service.applyInfo(payload)
+        // The renderer starts before the service finishes its handshake, so the
+        // initial loads below can all fail with SERVICE_UNAVAILABLE. Nothing
+        // retried them, and most state is only pushed when it *changes* — so a
+        // selected adapter and a chosen input stayed invisible until the
+        // operator happened to open the page that refetches them. On stage that
+        // reads as StageLink having lost its configuration.
+        if (!wasUsable && service.isUsable) void loadInitialState()
+      }),
       bridge.on('service.error', (payload) => service.appendError(payload)),
     ]
 
@@ -86,20 +121,6 @@ export default defineNuxtPlugin({
     // loaded after that happened (a reload mid-session), so it asks once here.
     service.applyInfo(await bridge.getServiceInfo())
 
-    // Settings first: other views read display preferences from them.
-    await settings.load()
-    await Promise.allSettled([
-      audio.refreshStatus(),
-      streaming.refreshStatus(),
-      network.refresh(),
-      session.refreshCurrent(),
-      receivers.refresh(),
-    ])
-
-    return {
-      provide: {
-        stagelink: bridge,
-      },
-    }
+    await loadInitialState()
   },
 })

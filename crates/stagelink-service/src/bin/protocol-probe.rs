@@ -97,6 +97,54 @@ fn answer(query: &Value) -> Value {
             json!({ "value": audio_protocol::sequence_delta(previous, current) })
         }
 
+        // Serialises a roster entry so the TypeScript side can validate it
+        // against `receiverSchema`. The entry is a fixture built here, not a
+        // real or simulated receiver: nothing about it reaches the UI, and the
+        // roster the application serves stays empty until a device joins.
+        Some("rosterEntryShape") => {
+            let mut entry = receiver_session::RosterEntry::new(
+                "0191f2c4-0000-7000-8000-00000000abcd",
+                receiver_session::ReceiverIdentity::from_wire(
+                    "Pixel 8",
+                    "android",
+                    Some("14".into()),
+                    Some("0.1.0".into()),
+                ),
+                Some("10.0.0.5".into()),
+                1_700_000_000_000,
+            );
+            entry.display_name = Some("Lead Vocal".into());
+            entry.last_heartbeat_at = Some(1_700_000_001_000);
+            entry.packets_sent = 2_000;
+            entry.packets_dropped_locally = 3;
+            if query
+                .get("withTelemetry")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+            {
+                entry.telemetry = Some(receiver_session::ReceiverReportedTelemetry {
+                    received_at: 1_700_000_002_000,
+                    reported_at: 1_700_000_001_900,
+                    packets_received: 1_990,
+                    packets_lost: 10,
+                    loss_percent: 0.5,
+                    jitter_ms: 2.5,
+                    buffer_health_ms: 40.0,
+                    underruns: 0,
+                    playback_state: receiver_session::PlaybackState::Playing,
+                    output_latency_ms: Some(38.0),
+                    resample_ratio_ppm: Some(-12.0),
+                });
+            }
+            stagelink_service::serialize::roster_entry(&entry)
+        }
+
+        Some("aeadNonce") => {
+            let session_id = query.get("sessionId").and_then(Value::as_u64).unwrap_or(0) as u32;
+            let sequence = query.get("sequence").and_then(Value::as_u64).unwrap_or(0) as u32;
+            json!({ "bytes": audio_protocol::aead_nonce(session_id, sequence).to_vec() })
+        }
+
         other => json!({
             "ok": false,
             "reason": format!("unknown query: {other:?}"),

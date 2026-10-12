@@ -10,5 +10,8 @@ pub mod roster;
 pub mod state;
 
 pub use join_code::JoinCode;
-pub use roster::{ReceiverRoster, RosterEntry};
+pub use roster::{
+    PlaybackState, ReceiverIdentity, ReceiverPlatform, ReceiverReportedTelemetry, ReceiverRoster,
+    RosterEntry,
+};
 pub use state::{Session, SessionError, SessionState, TransitionOutcome};

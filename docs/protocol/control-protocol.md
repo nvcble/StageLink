@@ -54,6 +54,15 @@ service's command line, and compared in **constant time**. A failed handshake
 drops the connection rather than allowing a retry loop. The pipe's DACL already
 admits only the current user's SID, so the token is defence in depth.
 
+**A receiver uses this same handshake.** Its join token goes in `token` and its
+self-description in an added `receiver` block, and the `welcome` comes back with
+an added `stream` block carrying the audio parameters — including the sample
+rate, which appears nowhere else. Both additions are optional fields on the
+existing messages, which is why a receiver needs no join method of its own; see
+[`pairing.md`](pairing.md). The local pipe refuses a `hello` carrying
+`receiver`, because `reject_remote_clients(true)` means no receiver can be on
+the other end of it.
+
 `availableAudioApis` reports what the running binary can *actually* use, not what
 it was compiled against — ASIO is absent unless both a backend and a driver are
 present.
@@ -101,6 +110,8 @@ the result before it reaches a Pinia store.
 | `receivers.disconnect` | ● | Drop from the current session |
 | `receivers.revoke` | ● | Withdraw authorisation permanently |
 | `receivers.createJoinCode` | ● | Mint a join code and QR payload, rotating the previous one |
+| `receiver.heartbeat` | ● | **Called by a receiver.** Liveness, acked with the desktop clock |
+| `receiver.telemetry` | ● | **Called by a receiver.** Its own quality figures, unverified |
 | `network.getStatus` | | Adapters, bound address, discovery, warnings |
 | `network.selectAdapter` | ● | Choose the streaming adapter and address |
 | `network.checkFirewall` | | Report on firewall rules. Read-only. |
@@ -124,16 +135,23 @@ the result before it reaches a Pinia store.
 `STREAM_BIND_FAILED`, `STREAM_TRANSPORT_REFUSED`, `INVALID_STATE_TRANSITION`,
 `OPERATION_IN_PROGRESS`, `RECEIVER_NOT_FOUND`, `RECEIVER_LIMIT_REACHED`,
 `PAIRING_REJECTED`, `NETWORK_ADAPTER_UNAVAILABLE`, `SETTINGS_INVALID`,
-`STORAGE_FAILURE`, `INTERNAL`.
+`STORAGE_FAILURE`, `NOT_IMPLEMENTED`, `INTERNAL`.
 
 Methods belonging to a later phase return `NOT_IMPLEMENTED` with the phase named
-in `detail`, never a plausible-looking empty success.
+in `detail`, never a plausible-looking empty success. `NOT_IMPLEMENTED` is a
+declared code for exactly that reason: an undeclared one fails the renderer's
+enum validation and collapses into `INTERNAL: "Unknown error"`, turning an
+honest "not built yet" into an apparent crash.
 
 ## Events
 
-Pushed service → client. Fire-and-forget: a full client queue drops the event
-rather than stalling telemetry, and every piece of state an event carries is
-also available as a request, so a dropped push is always recoverable.
+Pushed service → client only. A client-sent event is discarded, which is why
+receiver heartbeats and telemetry are requests rather than the events an earlier
+draft described.
+
+Fire-and-forget: a full client queue drops the event rather than stalling
+telemetry, and every piece of state an event carries is also available as a
+request, so a dropped push is always recoverable.
 
 ```jsonc
 { "v": 1, "kind": "event", "event": "audio.levels",

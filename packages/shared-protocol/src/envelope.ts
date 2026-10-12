@@ -14,17 +14,76 @@ import { CONTROL_PROTOCOL_VERSION, IPC_ENVELOPE_VERSION } from './version'
 
 export const MAX_ENVELOPE_BYTES = 1_048_576 as const
 
-/** Client -> service: authenticate and agree a protocol version. */
+/**
+ * Self-description a receiver sends when it joins.
+ *
+ * Everything here is self-reported and untrusted; the only field the desktop
+ * can vouch for is the source address it observed.
+ */
+export const receiverIdentitySchema = z.object({
+  deviceName: z.string().min(1).max(120),
+  platform: z.enum(['android', 'ios', 'windows', 'macos', 'linux', 'headless-test', 'unknown']),
+  platformVersion: z.string().max(60).nullable(),
+  appVersion: z.string().max(60).nullable(),
+  /** Long-term public key, hex. Lets the device reconnect without a new code. */
+  publicKey: z.string().min(1).max(256),
+})
+export type ReceiverIdentity = z.infer<typeof receiverIdentitySchema>
+
+/**
+ * Client -> service: authenticate and agree a protocol version.
+ *
+ * A receiver joins with this same message, putting its join token in `token`
+ * and its self-description in `receiver`. There is deliberately no separate
+ * `join.request` method: the envelope contract requires `hello` to be the first
+ * message and to carry the credential, so a second credential-bearing frame
+ * could never be first. One round trip, and the token is already in the field
+ * that is compared in constant time.
+ */
 export const helloEnvelopeSchema = z.object({
   v: z.literal(IPC_ENVELOPE_VERSION),
   kind: z.literal('hello'),
-  /** One-time secret handed to the service at spawn time. */
+  /**
+   * For the local pipe, the one-time secret handed to the service at spawn.
+   * For a receiver, the join token from the QR code.
+   */
   token: z.string().min(16),
   /** Informational client identity, e.g. "stagelink-desktop/0.1.0". */
   client: z.string().min(1),
   controlProtocolVersion: z.string().min(1),
+  /** Present only when a receiver is joining. */
+  receiver: receiverIdentitySchema.optional(),
 })
 export type HelloEnvelope = z.infer<typeof helloEnvelopeSchema>
+
+/**
+ * Audio parameters an admitted receiver needs in order to play correctly.
+ *
+ * **This is the only place the sample rate is communicated.** The packet header
+ * carries `channels` and `payloadFormat` but no rate, while the sender permits
+ * 8–192 kHz — so a receiver that assumed 48 kHz and got 44.1 kHz would play a
+ * semitone and a half sharp, in a performer's ears, live.
+ *
+ * A conforming receiver must *also* infer the rate independently, as
+ * `framesPerPacket / (Δ timestampUs / 1e6)` across two consecutive in-order
+ * packets, and refuse to play if the two disagree. Trusting one source for
+ * something this audible is not enough.
+ *
+ * Re-sent on any `sessionId` change, because the rate may change with it.
+ */
+export const streamParamsSchema = z.object({
+  /** Matches the `sessionId` in the audio packet headers. */
+  sessionId: z.number().int(),
+  sampleRate: z.number().int().positive(),
+  frameDurationMs: z.number().positive(),
+  payloadFormat: z.literal('pcm_s16le'),
+  transport: z.enum(['udp-plaintext', 'udp-encrypted']),
+  /** UDP port audio arrives on. */
+  streamPort: z.number().int().min(1),
+  /** Frames per packet, so the receiver can size its slots before any audio. */
+  framesPerPacket: z.number().int().positive(),
+})
+export type StreamParams = z.infer<typeof streamParamsSchema>
 
 /** Service -> client: handshake accepted. */
 export const welcomeEnvelopeSchema = z.object({
@@ -35,6 +94,13 @@ export const welcomeEnvelopeSchema = z.object({
   audioProtocolVersion: z.number().int(),
   availableAudioApis: z.array(z.enum(['wasapi', 'asio'])),
   pid: z.number().int(),
+  /** Present only when a receiver was admitted. */
+  stream: streamParamsSchema.optional(),
+  /**
+   * Fingerprint of the desktop's long-term key. A receiver pins this; a change
+   * means a different machine and must force a fresh join code.
+   */
+  keyFingerprint: z.string().optional(),
 })
 export type WelcomeEnvelope = z.infer<typeof welcomeEnvelopeSchema>
 

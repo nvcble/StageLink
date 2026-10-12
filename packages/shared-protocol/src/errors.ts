@@ -57,6 +57,17 @@ export const ServiceErrorCode = {
   /** Persistence layer failure. */
   StorageFailure: 'STORAGE_FAILURE',
 
+  /**
+   * The method exists in the protocol but this build does not implement it.
+   *
+   * `detail` names the phase it is scheduled for. Declared here because the
+   * service emits it and the UI is required to distinguish "not built yet"
+   * from "nothing to show" — without it, `toServiceError` fails its enum parse
+   * and collapses the whole thing to `INTERNAL: "Unknown error"`, which is the
+   * opposite of the intended behaviour.
+   */
+  NotImplemented: 'NOT_IMPLEMENTED',
+
   /** Anything genuinely unexpected. */
   Internal: 'INTERNAL',
 } as const

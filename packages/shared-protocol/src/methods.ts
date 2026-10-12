@@ -18,7 +18,11 @@ import {
 } from './network'
 import {
   joinCodeSchema,
+  receiverHeartbeatParamsSchema,
+  receiverHeartbeatResultSchema,
   receiverIdParamsSchema,
+  receiverTelemetryParamsSchema,
+  receiverTelemetryResultSchema,
   receiverSchema,
   receiversListResultSchema,
   renameReceiverParamsSchema,
@@ -162,6 +166,26 @@ export const METHODS = {
     description: 'Withdraw a receiver authorisation permanently and disconnect it.',
     mutates: true,
   },
+  // -- receiver -> desktop -------------------------------------------------
+  // The only two methods a receiver calls. Requests, not events: events are
+  // server-to-client only and the control server discards client-sent events.
+  'receiver.heartbeat': {
+    params: receiverHeartbeatParamsSchema,
+    result: receiverHeartbeatResultSchema,
+    timeoutMs: 2_000,
+    description:
+      'Receiver liveness. Missing RECEIVER_HEARTBEAT_MISS_LIMIT of these stops audio to it.',
+    mutates: true,
+  },
+  'receiver.telemetry': {
+    params: receiverTelemetryParamsSchema,
+    result: receiverTelemetryResultSchema,
+    timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+    description:
+      'Receiver-reported quality figures. Unverifiable by the desktop and labelled as such.',
+    mutates: true,
+  },
+
   'receivers.createJoinCode': {
     params: noParams,
     result: joinCodeSchema,

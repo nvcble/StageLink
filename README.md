@@ -51,7 +51,7 @@ Stated plainly, because a monitor system you cannot trust is worse than none:
 - **Audio does not reach phones yet.** The packet format, packetiser and
   per-receiver queues are built and tested; the UDP sender is Phase 3.
 - **Receivers cannot connect yet.** The join QR is real and final, but the
-  control server that honours it is Phase 3.
+  control server that honours it is Phase 5.
 - **The encrypted transport is not implemented.** Phase 5. The plaintext
   transport is refused in release builds.
 
@@ -61,8 +61,22 @@ phase, never a plausible-looking success. See
 
 ## Latency
 
-The design target is roughly **15–30 ms** from desktop to a wired earphone under
-favourable conditions. That is a target, not a measurement.
+The design target is **40–90 ms** from desktop capture to a wired earphone on
+Android, under favourable conditions. That is a target, not a measurement, and
+nothing in this repository has measured it.
+
+An earlier version of this file said 15–30 ms. That was not achievable and
+should not have been written: the Android output path alone is typically
+20–40 ms on a device with AAudio low-latency support and over 100 ms on cheap
+hardware, before any jitter buffer. The desktop's own contribution (a 10 ms
+WASAPI capture buffer plus a 5 ms packet) is the small part. A receiver's jitter
+buffer has to absorb real Wi-Fi arrival spread, which is tens of milliseconds on
+a shared access point.
+
+Being wrong about this by a factor of three matters: a vocalist monitoring their
+own voice notices around 15 ms, so the honest framing is that StageLink is built
+for in-ear monitoring on a dedicated network and that per-device measurement
+decides whether a given phone is usable.
 
 StageLink reports the desktop-side contributions it can genuinely measure, each
 labelled with how it was obtained, and deliberately does **not** present an

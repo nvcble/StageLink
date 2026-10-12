@@ -199,9 +199,21 @@ impl<H: ControlHandler> IpcServer<H> {
     /// Validates the `hello` and builds the `welcome`.
     fn authenticate(&self, line: &str) -> Result<Envelope> {
         let envelope = Envelope::decode(line)?;
-        let EnvelopeKind::Hello { token, client, control_protocol_version } = envelope.kind else {
+        let EnvelopeKind::Hello { token, client, control_protocol_version, receiver } =
+            envelope.kind
+        else {
             return Err(IpcError::Handshake("first message was not a hello"));
         };
+
+        // `receiver` belongs to the join handshake on the control server. This
+        // pipe sets `reject_remote_clients(true)`, so a receiver can never
+        // reach it; a hello claiming to be one is confused or hostile either
+        // way, and admitting it would leave a phantom in the roster.
+        if receiver.is_some() {
+            return Err(IpcError::Handshake(
+                "the local control pipe does not admit receivers",
+            ));
+        }
 
         // Constant-time, so a wrong token leaks nothing about the right one.
         if !constant_time_eq(&token, &self.config.token) {
@@ -220,6 +232,10 @@ impl<H: ControlHandler> IpcServer<H> {
             audio_protocol_version: self.handler.audio_protocol_version(),
             available_audio_apis: self.handler.available_audio_apis(),
             pid: std::process::id(),
+            // Both are for admitted receivers on the control server. The local
+            // client drives the stream, so it has no use for either.
+            stream: None,
+            key_fingerprint: None,
         }))
     }
 
@@ -281,6 +297,7 @@ pub fn major_versions_match(peer: &str, ours: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::ReceiverIdentity;
     use serde_json::{Value, json};
     use tokio::io::AsyncBufReadExt;
     use tokio::net::windows::named_pipe::ClientOptions;
@@ -343,10 +360,15 @@ mod tests {
     }
 
     fn hello(token: &str, version: &str) -> String {
+        hello_from(token, version, None)
+    }
+
+    fn hello_from(token: &str, version: &str, receiver: Option<ReceiverIdentity>) -> String {
         Envelope::new(EnvelopeKind::Hello {
             token: token.into(),
             client: "test/0.1.0".into(),
             control_protocol_version: version.into(),
+            receiver,
         })
         .encode()
         .unwrap()
@@ -414,6 +436,35 @@ mod tests {
         assert!(
             lines.next_line().await.unwrap_or(None).is_none(),
             "a rejected client must not receive a welcome"
+        );
+    }
+
+    /// Even holding the right token, a hello that claims to be a receiver is
+    /// refused here: receivers join on the control server, and letting one in
+    /// through the local pipe would put a device in the roster that no
+    /// network-facing code ever admitted.
+    #[tokio::test]
+    async fn a_receiver_hello_is_refused_on_the_local_pipe() {
+        let (config, _shutdown) = spawn_server();
+        let client = connect(&config).await;
+        let (reader, mut writer) = tokio::io::split(client);
+        let mut lines = BufReader::new(reader).lines();
+
+        let receiver = ReceiverIdentity {
+            device_name: "Pixel 8".into(),
+            platform: "android".into(),
+            platform_version: Some("14".into()),
+            app_version: Some("0.1.0".into()),
+            public_key: "aa".repeat(32),
+        };
+        writer
+            .write_all(hello_from(&config.token, "1.0.0", Some(receiver)).as_bytes())
+            .await
+            .unwrap();
+
+        assert!(
+            lines.next_line().await.unwrap_or(None).is_none(),
+            "a receiver must not be welcomed onto the local pipe"
         );
     }
 

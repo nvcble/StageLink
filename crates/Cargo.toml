@@ -109,6 +109,15 @@ features = [
 # Audio code benefits measurably from LTO; the binary is small either way.
 lto = "thin"
 codegen-units = 1
+# Correct for a standalone service: a panic in audio code means our invariants
+# are already broken, and unwinding past a WASAPI callback is undefined.
+#
+# WRONG for the mobile receiver core, which is a cdylib called from Dart over
+# the C ABI. A panic that aborts there takes the whole app down with no chance
+# to show the performer why their monitor stopped. When `receiver-core` is
+# added it must build with `panic = "unwind"` and catch at the FFI boundary
+# (`catch_unwind` in every exported function, returning an error code), because
+# unwinding *across* the boundary is undefined behaviour either way.
 panic = "abort"
 strip = "debuginfo"
 
