@@ -43,12 +43,10 @@ pub const DISPATCHED_METHODS: &[&str] = &[
     "stream.stop",
     "stream.getStatus",
     "receivers.list",
-    "receivers.approve",
-    "receivers.reject",
     "receivers.rename",
     "receivers.disconnect",
     "receivers.revoke",
-    "receivers.createPairingCode",
+    "receivers.createJoinCode",
     "network.getStatus",
     "network.selectAdapter",
     "network.checkFirewall",
@@ -401,7 +399,21 @@ impl StageLinkHandler {
         *self.state.settings.lock() = settings.clone();
         *self.state.selected_adapter.lock() = Some(adapter_id.clone());
 
-        Ok(serialize::network_status(&adapters, Some(&adapter_id), &settings))
+        let status = serialize::network_status(&adapters, Some(&adapter_id), &settings);
+
+        // Broadcast it. The caller gets the status back anyway, but anything
+        // else looking at network state — the join panel needs a bound address
+        // before it will mint a code — must not be left with a stale view just
+        // because the change came from somewhere it was not watching.
+        if let Some(sink) = self.sink() {
+            let _ = sink.send(desktop_ipc::codec::Envelope::event(
+                "network.status",
+                status.clone(),
+                now_ms(),
+            ));
+        }
+
+        Ok(status)
     }
 
     // -- session -----------------------------------------------------------
@@ -473,15 +485,72 @@ impl StageLinkHandler {
     // -- receivers ---------------------------------------------------------
 
     fn receivers_list(&self) -> Result<Value, ServiceErrorPayload> {
-        // Real, and really empty until pairing lands in Phase 5. No placeholder
-        // devices: the UI shows its empty state and the pairing instructions.
+        // Really empty until the control server lands. No placeholder devices:
+        // the UI shows its empty state and the join QR instead.
         let roster = self.state.roster.lock();
         let settings = self.state.settings_snapshot();
         Ok(json!({
             "receivers": roster.entries().iter().map(serialize::roster_entry).collect::<Vec<_>>(),
-            "pendingRequests": Vec::<Value>::new(),
+            "joinCode": self.current_join_code(),
             "maxReceivers": settings.streaming.max_receivers,
         }))
+    }
+
+    /// The current join code, or `Value::Null` if there is none or it expired.
+    ///
+    /// Expiry is evaluated on read rather than on a timer: a code nobody is
+    /// asking about does not need waking a thread to retire it.
+    fn current_join_code(&self) -> Value {
+        let now = now_ms();
+        let mut held = self.state.join_code.lock();
+        if held.as_ref().is_some_and(|code| !code.is_valid(now)) {
+            *held = None;
+        }
+        match held.as_ref() {
+            Some(code) => serialize::join_code(code, &self.state.settings_snapshot()),
+            None => Value::Null,
+        }
+    }
+
+    /// Mints a join code, replacing any previous one.
+    ///
+    /// Rotation is the whole mechanism for "that QR got shared" — the old token
+    /// stops working the moment this returns.
+    fn receivers_create_join_code(&self) -> Result<Value, ServiceErrorPayload> {
+        let settings = self.state.settings_snapshot();
+
+        // Without a bound address there is nothing to put in the QR, and a code
+        // pointing nowhere would just produce devices that fail to join.
+        if settings.network.bind_address.is_none() {
+            return Err(ServiceErrorPayload::new(
+                "NETWORK_ADAPTER_UNAVAILABLE",
+                "Choose a streaming network adapter before creating a join code.",
+            )
+            .with_detail(
+                "Receivers need an address to connect to. Pick the adapter facing your access \
+                 point on the Network page.",
+            ));
+        }
+
+        let code = receiver_session::JoinCode::mint(
+            now_ms(),
+            receiver_session::join_code::DEFAULT_TTL_MS,
+        );
+        let payload = serialize::join_code(&code, &settings);
+        *self.state.join_code.lock() = Some(code);
+
+        // Push it so any other view of the QR updates rather than showing a
+        // code that has just been invalidated.
+        if let Some(sink) = self.sink() {
+            let _ = sink.send(desktop_ipc::codec::Envelope::event(
+                "receivers.joinCode",
+                payload.clone(),
+                now_ms(),
+            ));
+        }
+
+        debug!("minted a join code");
+        Ok(payload)
     }
 
     // -- diagnostics -------------------------------------------------------
@@ -541,13 +610,12 @@ impl ControlHandler for StageLinkHandler {
 
             // receivers
             "receivers.list" => self.receivers_list(),
-            "receivers.approve"
-            | "receivers.reject"
-            | "receivers.rename"
-            | "receivers.disconnect"
-            | "receivers.revoke"
-            | "receivers.createPairingCode" => {
-                Err(Self::not_implemented(method, "Phase 5 (secure pairing)"))
+            "receivers.createJoinCode" => self.receivers_create_join_code(),
+            // These act on a receiver that has joined, which needs the control
+            // server. Minting the code is local and works today; accepting a
+            // connection does not.
+            "receivers.rename" | "receivers.disconnect" | "receivers.revoke" => {
+                Err(Self::not_implemented(method, "Phase 3 (receiver connections)"))
             }
 
             // streaming
@@ -672,7 +740,7 @@ mod tests {
     #[tokio::test]
     async fn unimplemented_methods_report_not_implemented_with_a_phase() {
         let handler = handler();
-        for method in ["stream.start", "stream.stop", "receivers.approve"] {
+        for method in ["stream.start", "stream.stop", "receivers.revoke"] {
             match handler.handle(method, json!({})).await {
                 Err(error) => {
                     assert_eq!(error.code, "NOT_IMPLEMENTED", "for {method}");
@@ -789,8 +857,80 @@ mod tests {
             0,
             "there must be no fabricated receivers"
         );
-        assert_eq!(result["pendingRequests"].as_array().unwrap().len(), 0);
+        assert_eq!(result["joinCode"], Value::Null, "no code until one is minted");
         assert_eq!(result["maxReceivers"], 16);
+    }
+
+    #[tokio::test]
+    async fn minting_a_join_code_needs_a_streaming_adapter_first() {
+        let handler = handler();
+        // A code pointing nowhere would just produce devices that fail to join,
+        // so this is refused with the action to take rather than a null host.
+        let error = handler
+            .handle("receivers.createJoinCode", Value::Null)
+            .await
+            .expect_err("no adapter is selected yet");
+        assert_eq!(error.code, "NETWORK_ADAPTER_UNAVAILABLE");
+        assert!(error.detail.unwrap().contains("Network page"));
+    }
+
+    #[tokio::test]
+    async fn a_minted_join_code_carries_a_scannable_payload() {
+        let handler = handler();
+        handler
+            .handle(
+                "settings.update",
+                json!({ "network": { "bindAddress": "10.0.0.1" } }),
+            )
+            .await
+            .unwrap();
+
+        let code = handler
+            .handle("receivers.createJoinCode", Value::Null)
+            .await
+            .unwrap();
+
+        let payload = code["qrPayload"].as_str().unwrap();
+        assert!(payload.starts_with("stagelink://join?"));
+        assert!(payload.contains("h=10.0.0.1"));
+        assert!(payload.contains(code["token"].as_str().unwrap()));
+        assert_eq!(code["host"], "10.0.0.1");
+        assert!(code["expiresAt"].as_i64().unwrap() > code["issuedAt"].as_i64().unwrap());
+
+        // And it is what receivers.list now reports.
+        let list = handler.handle("receivers.list", Value::Null).await.unwrap();
+        assert_eq!(list["joinCode"]["token"], code["token"]);
+    }
+
+    #[tokio::test]
+    async fn rotating_replaces_the_previous_code() {
+        let handler = handler();
+        handler
+            .handle(
+                "settings.update",
+                json!({ "network": { "bindAddress": "10.0.0.1" } }),
+            )
+            .await
+            .unwrap();
+
+        let first = handler
+            .handle("receivers.createJoinCode", Value::Null)
+            .await
+            .unwrap();
+        let second = handler
+            .handle("receivers.createJoinCode", Value::Null)
+            .await
+            .unwrap();
+
+        assert_ne!(
+            first["token"], second["token"],
+            "rotation is the answer to a shared QR, so the token must change"
+        );
+        let list = handler.handle("receivers.list", Value::Null).await.unwrap();
+        assert_eq!(
+            list["joinCode"]["token"], second["token"],
+            "only the newest code is live"
+        );
     }
 
     #[tokio::test]

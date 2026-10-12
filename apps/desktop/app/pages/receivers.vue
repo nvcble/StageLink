@@ -2,9 +2,13 @@
 /**
  * Connected Receivers.
  *
- * With nothing connected this page shows pairing instructions, not a sample
- * device. Every quality figure shown for a receiver is labelled as coming from
- * that receiver, because the desktop cannot verify any of it.
+ * Devices join by scanning the QR on this page — there is no approval queue.
+ * The QR carries a short-lived token, so what the operator holds up is a
+ * credential rather than just an address, and it is shown with its countdown
+ * so a stale code is obvious before somebody tries to scan it.
+ *
+ * Every quality figure shown for a receiver is labelled as coming from that
+ * receiver, because the desktop cannot verify any of it.
  */
 useHead({ title: 'Receivers · StageLink Core' })
 
@@ -19,17 +23,6 @@ const {
   formatPercent,
   formatMs,
 } = useReceivers()
-
-const network = useNetworkStore()
-
-const pairingSteps = computed(() => [
-  'Join the phone to the same Wi-Fi network as this machine’s streaming adapter.',
-  'Open StageLink Mobile and choose Find a server, or scan the pairing QR code.',
-  network.serverAddress
-    ? `If discovery does not find it, enter the address manually: ${network.serverAddress}`
-    : 'Select a streaming network adapter on the Network page so an address can be shown here.',
-  'Approve the device when it appears here. Approved devices reconnect automatically next time.',
-])
 
 const renamingId = ref<string | null>(null)
 const renameValue = ref('')
@@ -62,63 +55,8 @@ async function commitRename() {
       @update:open="receivers.clearError()"
     />
 
-    <!-- Pending approvals come first: they need a decision. -->
-    <SharedStagePanel
-      v-if="receivers.hasPendingApprovals"
-      title="Awaiting your approval"
-      icon="i-lucide-user-plus"
-      subtitle="Only the source address is verified by the desktop. Everything else is self-reported by the device."
-    >
-      <ul class="space-y-3">
-        <li
-          v-for="request in receivers.pendingRequests"
-          :key="request.requestId"
-          class="stage-panel-elevated flex flex-wrap items-center gap-4 px-4 py-3"
-        >
-          <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-2">
-              <span class="truncate font-medium">{{ request.deviceName }}</span>
-              <UBadge size="sm" variant="subtle" color="neutral">{{ request.platform }}</UBadge>
-              <UBadge
-                v-if="request.presentedValidCode"
-                size="sm"
-                variant="subtle"
-                color="success"
-              >
-                valid code
-              </UBadge>
-              <UBadge v-else size="sm" variant="subtle" color="warning">no code</UBadge>
-            </div>
-            <div class="selectable mt-1 flex flex-wrap gap-x-4 text-xs text-stage-muted">
-              <span>from {{ request.ipAddress }}</span>
-              <span class="stage-numeric">key {{ request.keyFingerprint }}</span>
-            </div>
-            <p class="mt-1 text-[11px] text-stage-faint">
-              Check the key fingerprint matches the one shown on the device before approving.
-            </p>
-          </div>
-          <div class="flex shrink-0 gap-2">
-            <UButton
-              color="primary"
-              size="sm"
-              icon="i-lucide-check"
-              @click="receivers.approve(request.requestId)"
-            >
-              Approve
-            </UButton>
-            <UButton
-              color="neutral"
-              variant="outline"
-              size="sm"
-              icon="i-lucide-x"
-              @click="receivers.reject(request.requestId)"
-            >
-              Reject
-            </UButton>
-          </div>
-        </li>
-      </ul>
-    </SharedStagePanel>
+    <!-- Joining: the QR is the authorisation. -->
+    <ReceiversJoinCodePanel />
 
     <!-- Roster -->
     <SharedStagePanel
@@ -143,8 +81,7 @@ async function commitRename() {
         v-if="receivers.receivers.length === 0"
         icon="i-lucide-smartphone"
         title="No receivers connected"
-        description="When a phone running StageLink Mobile pairs with this desktop it will appear here."
-        :steps="pairingSteps"
+        description="A phone appears here the moment it scans the join code above."
       />
 
       <ul v-else class="divide-y divide-stage-border">

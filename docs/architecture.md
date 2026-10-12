@@ -170,7 +170,7 @@ These are design rules, enforced by tests, not aspirations.
 | Renderer capabilities | `contextIsolation`, `sandbox`, no `nodeIntegration`, all permissions denied, CSP with no remote sources and no `unsafe-inline` for scripts in production |
 | Renderer navigation | Only the app protocol (or the dev server); external URLs restricted to `https:`/`mailto:` |
 | Main → service | Windows named pipe with a DACL admitting only the current user's SID, plus a per-launch 192-bit token compared in constant time |
-| Service → receivers | Authenticated pairing and an AEAD-encrypted audio transport (Phase 5); the plaintext transport is refused in release builds |
+| Service → receivers | A short-lived join token presented from the QR (possession is the authorisation), plus an AEAD-encrypted audio transport (Phase 5); the plaintext transport is refused in release builds |
 | Secrets at rest | DPAPI (`CryptProtectData`) with the secret's name bound in as entropy; never in a SQLite row |
 
 What this does **not** defend against: malware already running as the same
@@ -212,7 +212,7 @@ missing-file error.
 
 - [`protocol/control-protocol.md`](protocol/control-protocol.md) — control methods and events
 - [`protocol/audio-packets.md`](protocol/audio-packets.md) — the binary wire format
-- [`protocol/pairing.md`](protocol/pairing.md) — discovery and pairing for StageLink Mobile
+- [`protocol/pairing.md`](protocol/pairing.md) — join codes and the QR grammar for StageLink Mobile
 - [`latency-measurement.md`](latency-measurement.md) — how to get a real end-to-end figure
 - [`testing.md`](testing.md) — what is automated and what needs hardware
 - [`development.md`](development.md) — building and running

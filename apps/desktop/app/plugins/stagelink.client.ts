@@ -62,10 +62,7 @@ export default defineNuxtPlugin({
       bridge.on('audio.status', (payload) => audio.applyStatus(payload)),
       bridge.on('stream.status', (payload) => streaming.applyStatus(payload)),
       bridge.on('receivers.changed', (payload) => receivers.applyReceivers(payload.receivers)),
-      bridge.on('receivers.pairingRequest', (payload) => receivers.applyPairingRequest(payload)),
-      bridge.on('receivers.pairingResolved', (payload) =>
-        receivers.resolvePairingRequest(payload.requestId),
-      ),
+      bridge.on('receivers.joinCode', (payload) => receivers.applyJoinCode(payload)),
       bridge.on('network.status', (payload) => network.applyStatus(payload)),
       bridge.on('session.state', (payload) => session.applySession(payload)),
       bridge.on('session.event', (payload) => session.appendEvent(payload)),

@@ -73,7 +73,10 @@ try {
   await delay(500)
   send('Page.reload', { ignoreCache: true })
 
-  await delay(8_000)
+  await delay(6_000)
+  // Navigate to the Receivers page so its errors are captured too.
+  send('Runtime.evaluate', { expression: 'window.history.pushState({}, "", "/receivers"); window.dispatchEvent(new PopStateEvent("popstate"))' })
+  await delay(4_000)
 
   // Report the DOM state so "nothing rendered" is distinguishable from
   // "rendered but empty".

@@ -16,6 +16,7 @@ definePageMeta({ layout: 'default' })
 const audio = useAudioStore()
 const network = useNetworkStore()
 const settings = useSettingsStore()
+const receivers = useReceiverStore()
 const service = useServiceStore()
 const { deviceOptions, hasNoUsableDevice } = useAudioDevices()
 const { recommendedAdapter, recommendationReason, primaryAddress } = useNetworkStatus()
@@ -87,10 +88,9 @@ const steps = computed(() => [
   },
   {
     key: 'receiver',
-    title: 'Connect a test receiver',
-    complete: false,
-    blocked: true,
-    phase: 'Phase 3',
+    title: 'Show the join code',
+    complete: receivers.hasValidJoinCode,
+    blocked: !network.isConfigured,
   },
 ])
 
@@ -348,7 +348,26 @@ async function finish() {
         </div>
       </template>
 
-      <!-- 6 & 7. Streaming and receivers -->
+      <!-- 7. Join code -->
+      <template v-else-if="currentStep?.key === 'receiver'">
+        <p class="text-sm leading-relaxed text-stage-muted">
+          Receivers join by scanning this code. There is no approval step — scanning is the
+          authorisation, so keep the code on screen only while people are joining.
+        </p>
+        <div class="mt-4">
+          <ReceiversJoinCodePanel :size="180" :show-steps="false" />
+        </div>
+        <UAlert
+          class="mt-4"
+          color="neutral"
+          variant="subtle"
+          icon="i-lucide-construction"
+          title="Scanning will not connect yet"
+          description="The code and its QR are real and will work unchanged, but accepting the connection needs the control server from Phase 3. Nothing will appear in the receiver list until then."
+        />
+      </template>
+
+      <!-- 6. Streaming -->
       <template v-else>
         <UAlert
           color="neutral"

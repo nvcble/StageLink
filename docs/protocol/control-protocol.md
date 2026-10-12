@@ -96,13 +96,11 @@ the result before it reaches a Pinia store.
 | `stream.start` | ● | Begin sending audio to authorised receivers |
 | `stream.stop` | ● | Stop sending, draining unless `immediate` |
 | `stream.getStatus` | | Stream state and desktop-measured counters |
-| `receivers.list` | | Known receivers plus pending pairing requests |
-| `receivers.approve` | ● | Approve a pairing request |
-| `receivers.reject` | ● | Refuse a pairing request |
+| `receivers.list` | | Known receivers and the current join code |
 | `receivers.rename` | ● | Set the operator-facing label |
 | `receivers.disconnect` | ● | Drop from the current session |
 | `receivers.revoke` | ● | Withdraw authorisation permanently |
-| `receivers.createPairingCode` | ● | Mint a short-lived code and QR payload |
+| `receivers.createJoinCode` | ● | Mint a join code and QR payload, rotating the previous one |
 | `network.getStatus` | | Adapters, bound address, discovery, warnings |
 | `network.selectAdapter` | ● | Choose the streaming adapter and address |
 | `network.checkFirewall` | | Report on firewall rules. Read-only. |
@@ -151,8 +149,7 @@ also available as a request, so a dropped push is always recoverable.
 | `audio.status` | on change | Capture state, format, device health |
 | `stream.status` | on change | Stream state and counters |
 | `receivers.changed` | on change | The full receiver roster |
-| `receivers.pairingRequest` | on arrival | A device asking to pair |
-| `receivers.pairingResolved` | on resolution | Approved, rejected or expired |
+| `receivers.joinCode` | on mint/rotate/expiry | The current join code, or null |
 | `network.status` | on change | Adapters, address, warnings |
 | `session.state` | on transition | The session |
 | `session.event` | on append | One operational log entry |

@@ -49,18 +49,9 @@ export function useReceivers(options: { refreshOnMount?: boolean } = {}) {
   }
 
   function pairingLabel(receiver: Receiver): string {
-    switch (receiver.pairingState) {
-      case 'approved':
-        return 'Trusted'
-      case 'pending':
-        return 'Awaiting approval'
-      case 'rejected':
-        return 'Rejected'
-      case 'revoked':
-        return 'Authorisation revoked'
-      case 'unpaired':
-        return 'Not paired'
-    }
+    // Two states only: a device in the roster scanned a valid code, or the
+    // operator has since withdrawn that.
+    return receiver.pairingState === 'approved' ? 'Joined by QR' : 'Authorisation revoked'
   }
 
   /**

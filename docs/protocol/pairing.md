@@ -1,38 +1,46 @@
-# Discovery and pairing
+# Joining a session
 
-The contract StageLink Mobile implements to find a desktop, pair with it, and
-join a session.
+How StageLink Mobile finds a desktop and joins it.
 
-> **Phase status.** The service type, TXT-record keys and the payload grammar
-> below are **frozen** — they are what a receiver will browse for and parse.
-> Publishing the mDNS record and performing the pairing handshake is Phase 5
-> work. `receivers.createPairingCode` and the approval methods currently return
-> `NOT_IMPLEMENTED` naming that phase.
+> **Phase status.** The QR payload grammar and the join-code semantics below are
+> **frozen** — build against them. Minting a code works today; accepting the
+> connection needs the control server from Phase 3, so `receivers.rename`,
+> `disconnect` and `revoke` currently return `NOT_IMPLEMENTED`.
 
-## Principles
+## The model: scanning is the authorisation
 
-1. **Discovery is a convenience, never an authority.** A receiver that finds the
-   desktop by mDNS still has to pair and authenticate. Nothing is trusted
-   because it answered a multicast query.
-2. **Nothing secret is ever advertised.** No tokens, no keys, no pairing codes
-   in a TXT record. A fingerprint is a hash, not a secret.
-3. **The operator decides.** A device joins because somebody standing at the
-   laptop approved it, having compared a fingerprint shown on both screens.
-4. **A revoked device is remembered.** Its record is kept so it cannot return as
-   an unrecognised newcomer.
+There is **no approval step**. The desktop displays a QR code; a device that
+scans it and presents the token inside is authorised and joins immediately.
+
+The reasoning: the operator is holding a laptop on a stage with a band waiting.
+An approval queue means they have to look at the screen and tap for each of
+eight people, exactly when they are busiest. Showing a code and letting people
+scan it moves the decision to the moment they chose to display it.
+
+What this trades away, stated plainly: **the token is a bearer credential.**
+Anyone who photographs the screen can join while the code lives. Two mitigations
+are built in, and a third is operational:
+
+| Mitigation | Mechanism |
+| --- | --- |
+| Codes expire | `JOIN_CODE_TTL_MS` = 5 minutes |
+| Codes rotate | `receivers.createJoinCode` replaces the previous token immediately |
+| Devices can be ejected | `receivers.revoke` withdraws one device regardless of code state |
+
+Only show the code while people are joining.
 
 ## Service discovery
 
-DNS-SD over mDNS.
+Optional. A receiver that has a QR does not need discovery at all — the payload
+carries the address. Discovery exists for reconnecting a device that has joined
+before and whose desktop may have moved to a new address.
 
 ```
 service type : _stagelink._udp.local.
 instance     : operator-configurable, default "StageLink Core", ≤ 63 bytes
 ```
 
-TXT record keys (all values are ASCII strings):
-
-| Key | Meaning |
+| TXT key | Meaning |
 | --- | --- |
 | `cpv` | Control protocol version, e.g. `1.0.0` |
 | `apv` | Audio protocol version, e.g. `1` |
@@ -40,82 +48,101 @@ TXT record keys (all values are ASCII strings):
 | `sport` | Audio UDP port |
 | `name` | Human-readable server name |
 | `fp` | Fingerprint of the desktop's long-term public key |
-| `pair` | `1` if pairing is required (always `1` in a release build) |
+| `pair` | `1` if a join code is required (always `1`) |
 
-A receiver should **pin `fp`** after a successful pairing. If it changes, the
-receiver is talking to a different desktop (or a machine pretending to be the
-one it trusted) and must require fresh approval rather than reconnecting
-silently.
+Nothing secret is ever advertised: no tokens, no keys, no join codes. A
+fingerprint is a hash.
 
-If discovery is unavailable — many venue networks block multicast — the operator
-can read the address off the Network page and the receiver can connect directly
-to `cport`. Discovery failing must never be a dead end.
+Many venue networks block multicast, so discovery failing must never be a dead
+end — fall back to the address from the QR, or to manual entry.
 
-## Pairing
-
-### 1. The operator mints a code
-
-`receivers.createPairingCode` returns a 6-digit code valid for 120 seconds, plus
-a QR payload encoding the same information:
+## The QR payload
 
 ```
-stagelink://pair?host=10.0.0.1&cport=45871&sport=45872&code=418902&fp=AB%3ACD%3AEF%3A01&cpv=1.0.0
+stagelink://join?h=<host>&c=<controlPort>&s=<streamPort>&t=<token>&v=<controlProtocolVersion>
 ```
 
-The code is short-lived and single-use. It proves the person holding the phone is
-in the room with the operator; it is not a cryptographic secret and the protocol
-does not treat it as one.
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `h` | IPv4 string | Desktop address to connect to |
+| `c` | `u16` | Control channel port |
+| `s` | `u16` | Audio UDP port |
+| `t` | 64 hex chars | Join token — 256 bits from the OS generator |
+| `v` | semver | Control protocol version the desktop speaks |
 
-### 2. The receiver requests pairing
+Keys are one character on purpose. A payload under ~150 bytes keeps the QR at a
+low version, which is the difference between scanning it from across a stage and
+having to walk up to the laptop.
 
-Over the control channel, presenting its long-term public key and the code.
+A receiver that cannot parse the payload, or whose `v` major differs from its
+own, should say so rather than attempting the connection.
+
+Example:
+
+```
+stagelink://join?h=10.0.0.1&c=45871&s=45872&t=9f2c...64hex...&v=1.0.0
+```
+
+## Joining
+
+### 1. Scan and connect
+
+Parse the payload, open the control channel to `h:c`, and present the token
+along with the device's self-description.
 
 ```jsonc
-{ "v": 1, "kind": "request", "id": "1", "method": "pair.request",
+{ "v": 1, "kind": "request", "id": "1", "method": "join.request",
   "params": {
+    "token": "9f2c…",
     "deviceName": "Pixel 8",
     "platform": "android",
     "platformVersion": "15",
     "appVersion": "0.1.0",
-    "publicKey": "<hex Ed25519 public key>",
-    "code": "418902"
+    "publicKey": "<hex Ed25519 public key>"
   } }
 ```
 
-Everything here except the observed source address is **self-reported and
-untrusted**. The desktop surfaces it that way: the Receivers page labels the
-source address as the one field it can vouch for.
+Everything except the observed source address is self-reported and untrusted.
+The desktop stores `publicKey` so the device can reconnect later without a fresh
+code.
 
-### 3. The operator approves
+### 2. Admitted, or not
 
-The desktop raises `receivers.pairingRequest`, which includes a short
-`keyFingerprint` derived from the presented public key. The receiver shows the
-same fingerprint. The operator compares them and approves.
+The desktop compares the token in constant time and checks it has not expired.
+On success the receiver is `approved` and appears in the roster immediately.
 
-`presentedValidCode: false` means the device connected without a valid code —
-possible, and shown prominently, because an approval is then resting on the
-fingerprint comparison alone.
+| Failure | Error code |
+| --- | --- |
+| Wrong or expired token | `PAIRING_REJECTED` |
+| Receiver limit reached | `RECEIVER_LIMIT_REACHED` |
+| This device was revoked | `PAIRING_REJECTED` |
 
-### 4. Session keys
+A rejected receiver should tell the user to ask for a fresh code, not retry in a
+loop — the token will not start working.
 
-On approval, desktop and receiver derive a per-session key from the
-authenticated handshake. That key encrypts the audio payloads
+### 3. Session keys
+
+On admission, desktop and receiver derive a per-session key from the
+authenticated handshake. That key encrypts audio payloads
 (ChaCha20-Poly1305, see [`audio-packets.md`](audio-packets.md)). Keys are never
-transmitted and never written to the SQLite database — the desktop's own key
-material goes to the OS-protected store (DPAPI).
+transmitted and never written to SQLite; the desktop's own key material lives in
+the OS-protected store.
 
-### 5. Reconnection
+### 4. Reconnecting
 
-An approved receiver reconnects without operator interaction by proving
-possession of its long-term key. Two things can change that:
+A device that has joined keeps its authorisation until revoked, so it reconnects
+by proving possession of its long-term key — no new QR needed. It must require a
+fresh code if:
 
-- the operator enabled **Require approval every time a receiver joins**, or
-- the desktop's fingerprint changed, in which case the receiver must insist on
-  fresh approval.
+- the operator revoked it, or
+- the desktop's `fp` changed, meaning this is a different machine.
+
+**Pin `fp` after joining.** A changed fingerprint is the one signal that
+distinguishes "my desktop got a new IP" from "something else is answering".
 
 ## Receiver telemetry
 
-Approved receivers report quality every 2 s and heartbeat every 1 s. Five
+Admitted receivers report quality every 2 s and heartbeat every 1 s. Five
 consecutive missed heartbeats move a receiver to `timedOut` and stop audio being
 queued for it.
 
@@ -131,7 +158,7 @@ queued for it.
 ```
 
 The `source` field is mandatory and literal. The desktop cannot verify any of
-this, and the interface says so wherever it is shown.
+it, and the interface says so wherever it is shown.
 
 ## Receiver obligations
 
@@ -148,13 +175,15 @@ A conforming receiver must:
 6. Apply its own volume, EQ, mute and hearing-safety limiter locally. The
    desktop sends one identical mix to everyone and has no per-receiver
    processing.
-7. Pin the desktop's key fingerprint and require fresh approval if it changes.
+7. Pin the desktop's key fingerprint and require a fresh join code if it changes.
 8. Survive unrelated traffic on its ports without aborting.
+9. Never persist a join token after admission. It is single-purpose and
+   short-lived; the long-term key is what identifies the device afterwards.
 
 ## Hearing safety
 
-This is a system that puts audio directly into people's ears, often louder than
-they would choose, for an hour at a time. The limiter is a **receiver-side**
+This system puts audio directly into people's ears, often louder than they would
+choose, for an hour at a time. The output limiter is a **receiver-side**
 responsibility and is not optional: the desktop cannot know what earphones are
 attached or how loud the output stage is. A receiver implementation without a
 limiter is not conforming.

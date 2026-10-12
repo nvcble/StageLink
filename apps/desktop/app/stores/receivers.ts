@@ -1,28 +1,41 @@
 import {
+  isJoinCodeValid,
+  joinCodeTimeRemaining,
   receiverLabel,
-  type PairingRequest,
+  type JoinCode,
   type Receiver,
   type ServiceError,
 } from '@stagelink/shared-protocol'
 
 /**
- * Connected receivers.
+ * Connected receivers, and the join code that lets devices in.
+ *
+ * Devices authorise themselves by scanning the QR — there is no approval queue.
+ * The store therefore holds the current code and tracks its expiry, so the UI
+ * can never show a QR that has stopped working.
  *
  * The one rule this store exists to enforce: **nothing in here is invented.**
- * An empty roster stays empty. There is no demo device, no placeholder row and
- * no optimistic entry added before the service confirms it. An operator looking
- * at this screen thirty seconds before a service starts has to be able to trust
- * that what they see is what is connected.
+ * An empty roster stays empty. There is no demo device and no optimistic entry
+ * added before the service confirms it. An operator looking at this screen
+ * thirty seconds before a service has to be able to trust it.
  *
  * Likewise, every quality figure under `telemetry` is the receiver's own claim.
  * The store never promotes it to a measurement, and the UI labels it.
  */
 export const useReceiverStore = defineStore('receivers', () => {
   const receivers = ref<Receiver[]>([])
-  const pendingRequests = ref<PairingRequest[]>([])
+  const joinCode = ref<JoinCode | null>(null)
   const maxReceivers = ref(16)
   const isLoading = ref(false)
+  const isMintingCode = ref(false)
   const lastError = ref<ServiceError | null>(null)
+
+  /**
+   * Ticks every second so the countdown advances and the code retires itself
+   * in the UI at the same moment the service stops honouring it.
+   */
+  const now = ref(Date.now())
+  let ticker: ReturnType<typeof setInterval> | null = null
 
   /** Receivers currently getting audio. */
   const connected = computed(() =>
@@ -45,9 +58,16 @@ export const useReceiverStore = defineStore('receivers', () => {
     ),
   )
 
-  const isEmpty = computed(() => receivers.value.length === 0 && pendingRequests.value.length === 0)
-  const hasPendingApprovals = computed(() => pendingRequests.value.length > 0)
+  const isEmpty = computed(() => receivers.value.length === 0)
   const atCapacity = computed(() => connectedCount.value >= maxReceivers.value)
+
+  /** True while the displayed QR will actually admit a device. */
+  const hasValidJoinCode = computed(() => isJoinCodeValid(joinCode.value, now.value))
+
+  /** Seconds left on the current code, for the countdown. */
+  const joinCodeSecondsRemaining = computed(() =>
+    Math.ceil(joinCodeTimeRemaining(joinCode.value, now.value) / 1_000),
+  )
 
   /** Receivers sorted for display: attention first, then by label. */
   const sorted = computed(() => {
@@ -86,18 +106,8 @@ export const useReceiverStore = defineStore('receivers', () => {
     receivers.value = next
   }
 
-  function applyPairingRequest(request: PairingRequest) {
-    const existing = pendingRequests.value.findIndex(
-      (candidate) => candidate.requestId === request.requestId,
-    )
-    if (existing >= 0) pendingRequests.value.splice(existing, 1, request)
-    else pendingRequests.value = [...pendingRequests.value, request]
-  }
-
-  function resolvePairingRequest(requestId: string) {
-    pendingRequests.value = pendingRequests.value.filter(
-      (request) => request.requestId !== requestId,
-    )
+  function applyJoinCode(next: JoinCode | null) {
+    joinCode.value = next
   }
 
   async function refresh() {
@@ -107,7 +117,7 @@ export const useReceiverStore = defineStore('receivers', () => {
       const result = await tryInvoke('receivers.list')
       if (result.ok) {
         receivers.value = result.value.receivers
-        pendingRequests.value = result.value.pendingRequests
+        joinCode.value = result.value.joinCode
         maxReceivers.value = result.value.maxReceivers
         lastError.value = null
       } else {
@@ -119,41 +129,34 @@ export const useReceiverStore = defineStore('receivers', () => {
   }
 
   /**
+   * Mints a join code, replacing any previous one.
+   *
+   * Rotation is the operator's answer to a QR that got photographed or shared:
+   * the old token stops working the moment this resolves.
+   */
+  async function createJoinCode() {
+    const { tryInvoke } = useStageLinkBridge()
+    isMintingCode.value = true
+    try {
+      const result = await tryInvoke('receivers.createJoinCode')
+      if (!result.ok) {
+        lastError.value = result.error
+        return null
+      }
+      joinCode.value = result.value
+      lastError.value = null
+      return result.value
+    } finally {
+      isMintingCode.value = false
+    }
+  }
+
+  /**
    * Administrative actions.
    *
    * Each refreshes from the service rather than mutating locally, so the list
    * always reflects what the service actually did.
    */
-  async function approve(requestId: string, displayName?: string) {
-    const { tryInvoke } = useStageLinkBridge()
-    const result = await tryInvoke('receivers.approve', {
-      requestId,
-      ...(displayName ? { displayName } : {}),
-      trustPermanently: true,
-    })
-    if (!result.ok) {
-      lastError.value = result.error
-      return false
-    }
-    resolvePairingRequest(requestId)
-    await refresh()
-    return true
-  }
-
-  async function reject(requestId: string, reason?: string) {
-    const { tryInvoke } = useStageLinkBridge()
-    const result = await tryInvoke('receivers.reject', {
-      requestId,
-      ...(reason ? { reason } : {}),
-    })
-    if (!result.ok) {
-      lastError.value = result.error
-      return false
-    }
-    resolvePairingRequest(requestId)
-    return true
-  }
-
   async function rename(receiverId: string, displayName: string) {
     const { tryInvoke } = useStageLinkBridge()
     const result = await tryInvoke('receivers.rename', { receiverId, displayName })
@@ -188,14 +191,18 @@ export const useReceiverStore = defineStore('receivers', () => {
     return true
   }
 
-  async function createPairingCode() {
-    const { tryInvoke } = useStageLinkBridge()
-    const result = await tryInvoke('receivers.createPairingCode')
-    if (!result.ok) {
-      lastError.value = result.error
-      return null
-    }
-    return result.value
+  /** Starts the one-second clock driving the join-code countdown. */
+  function startClock() {
+    if (ticker !== null) return
+    ticker = setInterval(() => {
+      now.value = Date.now()
+    }, 1_000)
+  }
+
+  function stopClock() {
+    if (ticker === null) return
+    clearInterval(ticker)
+    ticker = null
   }
 
   function clearError() {
@@ -204,30 +211,31 @@ export const useReceiverStore = defineStore('receivers', () => {
 
   return {
     receivers,
-    pendingRequests,
+    joinCode,
     maxReceivers,
     isLoading,
+    isMintingCode,
     lastError,
     connected,
     connectedCount,
     timedOut,
     offline,
     isEmpty,
-    hasPendingApprovals,
     atCapacity,
+    hasValidJoinCode,
+    joinCodeSecondsRemaining,
     sorted,
     worstReportedLoss,
     worstReportedJitter,
     applyReceivers,
-    applyPairingRequest,
-    resolvePairingRequest,
+    applyJoinCode,
     refresh,
-    approve,
-    reject,
+    createJoinCode,
     rename,
     disconnect,
     revoke,
-    createPairingCode,
+    startClock,
+    stopClock,
     clearError,
   }
 })

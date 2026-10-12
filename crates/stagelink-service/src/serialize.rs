@@ -15,7 +15,7 @@ use audio_capture::DeviceInfo;
 use desktop_ipc::codec::ServiceErrorPayload;
 use device_discovery::{NetworkAdapter, evaluate_warnings};
 use persistence::SessionRecord;
-use receiver_session::{Session, RosterEntry};
+use receiver_session::{JoinCode, RosterEntry, Session};
 use serde_json::{Value, json};
 use telemetry::{LatencyBreakdown, Measurement};
 
@@ -223,7 +223,9 @@ pub fn roster_entry(entry: &RosterEntry) -> Value {
         "appVersion": Value::Null,
         "ipAddress": entry.ip_address,
         "connectionState": entry.connection_state,
-        "pairingState": "pending",
+        // A receiver in the roster got there by presenting a valid join code,
+        // which is what authorisation means in this model.
+        "pairingState": "approved",
         "firstSeenAt": entry.joined_at,
         "lastSeenAt": entry.last_heartbeat_at.unwrap_or(entry.joined_at),
         "lastHeartbeatAt": entry.last_heartbeat_at,
@@ -242,6 +244,28 @@ pub fn roster_entry(entry: &RosterEntry) -> Value {
             "playbackState": "unknown",
             "outputLatencyMs": Value::Null,
         })),
+    })
+}
+
+/// A join code, as `joinCodeSchema`.
+#[must_use]
+pub fn join_code(code: &JoinCode, settings: &AppSettings) -> Value {
+    let host = settings
+        .network
+        .bind_address
+        .clone()
+        .unwrap_or_default();
+    let control_port = settings.network.control_port;
+    let stream_port = settings.network.stream_port;
+
+    json!({
+        "token": code.token,
+        "qrPayload": code.qr_payload(&host, control_port, stream_port, CONTROL_PROTOCOL_VERSION),
+        "host": host,
+        "controlPort": control_port,
+        "streamPort": stream_port,
+        "issuedAt": code.issued_at,
+        "expiresAt": code.expires_at,
     })
 }
 

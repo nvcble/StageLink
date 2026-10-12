@@ -20,17 +20,18 @@ export const receiverPlatformSchema = z.enum([
 ])
 export type ReceiverPlatform = z.infer<typeof receiverPlatformSchema>
 
-/** Authorisation lifecycle, persisted in SQLite. */
+/**
+ * Authorisation lifecycle, persisted in SQLite.
+ *
+ * Only two states, because authorisation is granted by scanning the join QR
+ * rather than by an operator approving a request. A device that presented a
+ * valid code is `approved`; the operator can later withdraw that with
+ * `receivers.revoke`.
+ */
 export const pairingStateSchema = z.enum([
-  /** Discovered but has never requested pairing. */
-  'unpaired',
-  /** Awaiting operator approval. */
-  'pending',
-  /** Trusted; may join sessions without re-approval. */
+  /** Presented a valid join code. Trusted until revoked. */
   'approved',
-  /** Explicitly refused this pairing attempt. */
-  'rejected',
-  /** Was approved, authorisation withdrawn. */
+  /** Authorisation withdrawn by the operator. */
   'revoked',
 ])
 export type PairingState = z.infer<typeof pairingStateSchema>
@@ -115,52 +116,51 @@ export function receiverLabel(receiver: Receiver): string {
 }
 
 // ---------------------------------------------------------------------------
-// Pairing
+// Joining
 // ---------------------------------------------------------------------------
 
 /**
- * A pending pairing request surfaced to the operator. Contains only
- * self-reported data plus the observed source address, which is the one field
- * the desktop can vouch for.
+ * How long a join code stays valid. The operator can rotate it at any time.
+ *
+ * Short on purpose: the code in the QR is a bearer credential, so anyone who
+ * photographs the operator's screen can join while it lives. Five minutes is
+ * long enough to walk a band through scanning and short enough that a
+ * screenshot is not lasting access.
  */
-export const pairingRequestSchema = z.object({
-  requestId: z.string().min(1),
-  receiverId: z.string().min(1),
-  deviceName: z.string(),
-  platform: receiverPlatformSchema,
-  platformVersion: z.string().nullable(),
-  appVersion: z.string().nullable(),
-  /** Observed source address of the request — desktop-measured. */
-  ipAddress: z.string(),
-  requestedAt: z.number().int(),
-  /** Request expiry; stale requests are discarded. */
+export const JOIN_CODE_TTL_MS = 300_000 as const
+
+/** Bytes of randomness in a join token. */
+export const JOIN_TOKEN_BYTES = 32 as const
+
+/**
+ * The current join code, and everything a receiver needs to connect.
+ *
+ * `qrPayload` is what the QR encodes; see `docs/protocol/pairing.md` for the
+ * grammar. The other fields are broken out so the desktop can also display the
+ * address for manual entry when a camera is not an option.
+ */
+export const joinCodeSchema = z.object({
+  /** Bearer credential. Presenting it is what authorises a receiver. */
+  token: z.string().min(16),
+  qrPayload: z.string().min(1),
+  host: z.string().min(1),
+  controlPort: z.number().int().min(1),
+  streamPort: z.number().int().min(1),
+  issuedAt: z.number().int(),
   expiresAt: z.number().int(),
-  /**
-   * Short fingerprint of the receiver's long-term public key, rendered for
-   * out-of-band comparison on the device screen.
-   */
-  keyFingerprint: z.string(),
-  /** True when the receiver presented a currently valid pairing code. */
-  presentedValidCode: z.boolean(),
 })
 
-export type PairingRequest = z.infer<typeof pairingRequestSchema>
+export type JoinCode = z.infer<typeof joinCodeSchema>
 
-export const PAIRING_CODE_TTL_MS = 120_000 as const
-export const PAIRING_CODE_LENGTH = 6 as const
+/** Whether a join code is still usable at `now`. */
+export function isJoinCodeValid(code: JoinCode | null, now = Date.now()): boolean {
+  return code !== null && code.expiresAt > now
+}
 
-export const pairingCodeSchema = z.object({
-  /** Numeric code the operator reads out, e.g. "418 902". */
-  code: z.string().length(PAIRING_CODE_LENGTH),
-  expiresAt: z.number().int(),
-  /**
-   * Everything a receiver needs to connect, encoded for a QR code. See
-   * docs/protocol/pairing.md for the payload grammar.
-   */
-  qrPayload: z.string(),
-})
-
-export type PairingCodeInfo = z.infer<typeof pairingCodeSchema>
+/** Milliseconds until a join code expires, clamped at zero. */
+export function joinCodeTimeRemaining(code: JoinCode | null, now = Date.now()): number {
+  return code === null ? 0 : Math.max(0, code.expiresAt - now)
+}
 
 // ---------------------------------------------------------------------------
 // Method params
@@ -168,7 +168,8 @@ export type PairingCodeInfo = z.infer<typeof pairingCodeSchema>
 
 export const receiversListResultSchema = z.object({
   receivers: z.array(receiverSchema),
-  pendingRequests: z.array(pairingRequestSchema),
+  /** The current join code, or null if none has been minted or it expired. */
+  joinCode: joinCodeSchema.nullable(),
   maxReceivers: z.number().int().min(1),
 })
 export type ReceiversListResult = z.infer<typeof receiversListResultSchema>
@@ -177,21 +178,6 @@ export const receiverIdParamsSchema = z.object({
   receiverId: z.string().min(1),
 })
 export type ReceiverIdParams = z.infer<typeof receiverIdParamsSchema>
-
-export const approvePairingParamsSchema = z.object({
-  requestId: z.string().min(1),
-  /** Optional label applied at approval time. */
-  displayName: z.string().max(60).optional(),
-  /** Persist as trusted so the device reconnects without re-approval. */
-  trustPermanently: z.boolean().default(true),
-})
-export type ApprovePairingParams = z.infer<typeof approvePairingParamsSchema>
-
-export const rejectPairingParamsSchema = z.object({
-  requestId: z.string().min(1),
-  reason: z.string().max(200).optional(),
-})
-export type RejectPairingParams = z.infer<typeof rejectPairingParamsSchema>
 
 export const renameReceiverParamsSchema = z.object({
   receiverId: z.string().min(1),

@@ -37,6 +37,8 @@ FOH mixer ─ AUX send ─ USB interface ─ Windows desktop ─ Ethernet ─ Wi
   that are unplugged or disabled, with the reason shown.
 - An authenticated local control channel between Electron and the Rust service
   over a named pipe restricted to the current user.
+- Join codes with locally generated QR codes: a device scans and admits itself,
+  with no approval queue. Codes expire after five minutes and rotate on demand.
 - Session state machine, SQLite persistence with versioned migrations, and
   diagnostics where every figure is tagged `measured`, `estimated` or
   `receiver-reported`.
@@ -48,7 +50,8 @@ Stated plainly, because a monitor system you cannot trust is worse than none:
 
 - **Audio does not reach phones yet.** The packet format, packetiser and
   per-receiver queues are built and tested; the UDP sender is Phase 3.
-- **Receiver pairing is not implemented.** Phase 5.
+- **Receivers cannot connect yet.** The join QR is real and final, but the
+  control server that honours it is Phase 3.
 - **The encrypted transport is not implemented.** Phase 5. The plaintext
   transport is refused in release builds.
 
@@ -113,7 +116,7 @@ listed in [docs/testing.md](docs/testing.md).
 | [latency-measurement.md](docs/latency-measurement.md) | How to obtain a real end-to-end figure |
 | [protocol/control-protocol.md](docs/protocol/control-protocol.md) | Methods, events, errors, versioning |
 | [protocol/audio-packets.md](docs/protocol/audio-packets.md) | The binary wire format |
-| [protocol/pairing.md](docs/protocol/pairing.md) | Discovery and pairing for StageLink Mobile |
+| [protocol/pairing.md](docs/protocol/pairing.md) | Join codes, QR grammar and receiver obligations |
 
 ## A note on the signal
 

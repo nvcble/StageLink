@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { audioLevelsSchema, audioStatusSchema } from './audio'
 import { diagnosticsSnapshotSchema } from './diagnostics'
 import { networkStatusSchema } from './network'
-import { pairingRequestSchema, receiverSchema } from './receivers'
+import { joinCodeSchema, receiverSchema } from './receivers'
 import { logRecordSchema, serviceInfoSchema } from './service'
 import { sessionEventSchema, sessionSchema } from './session'
 import { streamStatusSchema } from './stream'
@@ -25,13 +25,13 @@ export const EVENTS = {
   'stream.status': streamStatusSchema,
   /** The receiver roster changed (join, leave, rename, state change). */
   'receivers.changed': z.object({ receivers: z.array(receiverSchema) }),
-  /** A device is asking to pair and needs operator attention. */
-  'receivers.pairingRequest': pairingRequestSchema,
-  /** A pending request expired or was handled elsewhere. */
-  'receivers.pairingResolved': z.object({
-    requestId: z.string(),
-    outcome: z.enum(['approved', 'rejected', 'expired']),
-  }),
+  /**
+   * The join code was minted, rotated or expired.
+   *
+   * Pushed so the displayed QR cannot outlive the code it encodes — an
+   * operator holding up a stale QR would simply see devices fail to join.
+   */
+  'receivers.joinCode': joinCodeSchema.nullable(),
   /** Adapter list, bound address, discovery state or warnings changed. */
   'network.status': networkStatusSchema,
   /** Session state machine transitioned. */
@@ -71,6 +71,7 @@ export const SNAPSHOT_EVENTS = [
   'audio.status',
   'stream.status',
   'receivers.changed',
+  'receivers.joinCode',
   'network.status',
   'session.state',
   'diagnostics.snapshot',

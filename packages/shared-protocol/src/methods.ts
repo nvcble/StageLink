@@ -17,12 +17,10 @@ import {
   selectAdapterParamsSchema,
 } from './network'
 import {
-  approvePairingParamsSchema,
-  pairingCodeSchema,
+  joinCodeSchema,
   receiverIdParamsSchema,
   receiverSchema,
   receiversListResultSchema,
-  rejectPairingParamsSchema,
   renameReceiverParamsSchema,
 } from './receivers'
 import {
@@ -140,22 +138,8 @@ export const METHODS = {
     params: noParams,
     result: receiversListResultSchema,
     timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
-    description: 'All known receivers plus any pending pairing requests.',
+    description: 'All known receivers and the current join code.',
     mutates: false,
-  },
-  'receivers.approve': {
-    params: approvePairingParamsSchema,
-    result: receiverSchema,
-    timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
-    description: 'Approve a pending pairing request and optionally trust it permanently.',
-    mutates: true,
-  },
-  'receivers.reject': {
-    params: rejectPairingParamsSchema,
-    result: z.object({ requestId: z.string() }),
-    timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
-    description: 'Refuse a pending pairing request.',
-    mutates: true,
   },
   'receivers.rename': {
     params: renameReceiverParamsSchema,
@@ -178,11 +162,13 @@ export const METHODS = {
     description: 'Withdraw a receiver authorisation permanently and disconnect it.',
     mutates: true,
   },
-  'receivers.createPairingCode': {
+  'receivers.createJoinCode': {
     params: noParams,
-    result: pairingCodeSchema,
+    result: joinCodeSchema,
     timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
-    description: 'Mint a short-lived pairing code and its QR payload.',
+    description:
+      'Mint a short-lived join code and its QR payload, replacing any previous one. ' +
+      'A receiver that scans it is authorised without further approval.',
     mutates: true,
   },
 

@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use parking_lot::Mutex;
 use persistence::{Database, SecretStore};
-use receiver_session::{ReceiverRoster, Session};
+use receiver_session::{JoinCode, ReceiverRoster, Session};
 use telemetry::SystemProbe;
 
 use crate::audio_engine::AudioEngine;
@@ -37,6 +37,9 @@ pub struct ServiceState {
     pub settings: Mutex<AppSettings>,
     pub session: Mutex<Option<Session>>,
     pub roster: Mutex<ReceiverRoster>,
+    /// The join code currently encoded in the QR, if one has been minted.
+    /// Replaced wholesale on rotation, so the previous token stops working.
+    pub join_code: Mutex<Option<JoinCode>>,
     pub system: SystemProbe,
     /// Network adapter chosen for streaming, mirrored from settings.
     pub selected_adapter: Mutex<Option<String>>,
@@ -72,6 +75,7 @@ impl ServiceState {
             settings: Mutex::new(settings),
             session: Mutex::new(None),
             roster: Mutex::new(ReceiverRoster::new()),
+            join_code: Mutex::new(None),
             system: SystemProbe::new(),
             selected_adapter: Mutex::new(selected_adapter),
             diagnostics_streaming: Mutex::new(DiagnosticsSubscription::default()),

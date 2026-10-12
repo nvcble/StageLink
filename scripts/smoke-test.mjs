@@ -118,6 +118,28 @@ class Cdp {
   }
 }
 
+/**
+ * Navigates to a route the way an operator does: by clicking the sidebar link.
+ *
+ * `history.pushState` plus a synthetic `popstate` changes the URL without
+ * reliably driving Vue Router's render, which produces the worst kind of test
+ * result — a passing URL assertion over a page that never rendered. Clicking
+ * the real link exercises the real path.
+ */
+async function navigate(cdp, route) {
+  const clicked = await cdp.evaluate(
+    `(() => {
+      const link = document.querySelector('nav a[href="${route}"]')
+      if (!link) return false
+      link.click()
+      return true
+    })()`,
+  )
+  if (clicked !== true) {
+    throw new Error(`no sidebar link for ${route}`)
+  }
+}
+
 async function main() {
   mkdirSync(outputDir, { recursive: true })
 
@@ -308,6 +330,82 @@ async function main() {
       String(bodyText).includes('No audio input selected'),
     )
 
+    // -- the join QR renders locally --------------------------------------
+    await navigate(cdp, '/receivers')
+    await delay(1_200)
+
+    const joinReport = JSON.parse(
+      String(
+        await cdp.evaluate(`JSON.stringify({
+          hasPanel: document.body.innerText.includes("Add a receiver"),
+          statesAuthorisation: document.body.innerText.includes("Treat it like a key"),
+          hasApprovalQueue: document.body.innerText.includes("Awaiting your approval"),
+        })`),
+      ),
+    )
+    check('the Receivers page shows the join panel', joinReport.hasPanel, JSON.stringify(joinReport))
+    check(
+      'the panel says the code is a credential, not just an address',
+      joinReport.statesAuthorisation,
+      JSON.stringify(joinReport),
+    )
+    check(
+      'there is no approval queue left in the interface',
+      joinReport.hasApprovalQueue === false,
+      JSON.stringify(joinReport),
+    )
+
+    // Minting needs a streaming adapter, which this machine may not have
+    // configured. Both outcomes are correct; what must not happen is a QR
+    // appearing without a real code behind it.
+    const mint = JSON.parse(
+      String(
+        await cdp.evaluate(
+          'window.stagelink.invoke("receivers.createJoinCode")' +
+            '.then(c => JSON.stringify({ ok: true, payload: c.qrPayload, token: c.token, host: c.host }))' +
+            '.catch(e => JSON.stringify({ ok: false, code: e.code, message: e.message }))',
+        ),
+      ),
+    )
+
+    if (mint.ok) {
+      check(
+        'a minted join code carries a scannable payload',
+        String(mint.payload).startsWith('stagelink://join?') &&
+          String(mint.payload).includes(mint.token),
+        JSON.stringify(mint),
+      )
+      check('the join token is 256 bits of hex', /^[0-9a-f]{64}$/.test(String(mint.token)))
+
+      await delay(800)
+      const qr = JSON.parse(
+        String(
+          await cdp.evaluate(`(() => {
+            const svg = document.querySelector("svg[viewBox]")
+            return JSON.stringify({
+              rendered: svg !== null,
+              shapes: svg ? svg.querySelectorAll("path, rect").length : 0,
+              remote: document.body.innerHTML.includes("api.qrserver") ||
+                      document.body.innerHTML.includes("chart.googleapis"),
+            })
+          })()`),
+        ),
+      )
+      check('the QR rendered as inline SVG', qr.rendered && qr.shapes > 0, JSON.stringify(qr))
+      check('the QR was generated locally, not fetched', qr.remote === false, JSON.stringify(qr))
+    } else {
+      check(
+        'minting is refused with guidance when no adapter is selected',
+        mint.code === 'NETWORK_ADAPTER_UNAVAILABLE' ||
+          /streaming network adapter/.test(String(mint.message)),
+        JSON.stringify(mint),
+      )
+      console.log('[smoke] no streaming adapter configured; QR rendering not exercised')
+    }
+
+    await navigate(cdp, '/')
+    await delay(600)
+
     // -- icons are bundled, not fetched -----------------------------------
     // Nuxt Icon renders in CSS mode: a span whose mask-image is the icon. A
     // *data URI* mask is the thing being asserted — it proves the glyph was
@@ -344,12 +442,12 @@ async function main() {
 
     // -- routing -----------------------------------------------------------
     for (const route of ['/audio', '/receivers', '/network', '/diagnostics', '/settings', '/about']) {
-      await cdp.evaluate(`window.history.pushState({}, "", "${route}"); window.dispatchEvent(new PopStateEvent("popstate"))`)
+      await navigate(cdp, route)
       await delay(400)
       const pathname = await cdp.evaluate('window.location.pathname')
       check(`client-side routing reaches ${route}`, pathname === route, String(pathname))
     }
-    await cdp.evaluate('window.history.pushState({}, "", "/"); window.dispatchEvent(new PopStateEvent("popstate"))')
+    await navigate(cdp, '/')
     await delay(600)
 
     // -- capture the window, not the screen --------------------------------

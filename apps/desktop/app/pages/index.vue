@@ -202,17 +202,8 @@ async function onStop() {
           <span class="text-sm text-stage-muted">of {{ receivers.maxReceivers }} connected</span>
         </div>
 
-        <div v-if="receivers.hasPendingApprovals" class="mt-4">
-          <UAlert
-            color="warning"
-            variant="subtle"
-            icon="i-lucide-user-plus"
-            :title="`${receivers.pendingRequests.length} device awaiting approval`"
-          />
-        </div>
-
-        <p v-else-if="receivers.isEmpty" class="mt-4 text-sm leading-relaxed text-stage-muted">
-          No receivers have connected. Open the Receivers page for pairing instructions.
+        <p v-if="receivers.isEmpty" class="mt-4 text-sm leading-relaxed text-stage-muted">
+          No receivers have connected. Open the Receivers page to show the join QR code.
         </p>
 
         <dl v-else class="mt-4 space-y-2.5">

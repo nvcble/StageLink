@@ -123,6 +123,7 @@ export default defineNuxtConfig({
         'lucide:play',
         'lucide:play-circle',
         'lucide:power',
+        'lucide:qr-code',
         'lucide:radio',
         'lucide:refresh-cw',
         'lucide:rotate-ccw',
@@ -144,10 +145,8 @@ export default defineNuxtConfig({
         'lucide:timer',
         'lucide:triangle-alert',
         'lucide:unplug',
-        'lucide:user-plus',
         'lucide:volume-x',
         'lucide:wand-sparkles',
-        'lucide:x',
       /* icon-bundle:end */
       ],
       sizeLimitKb: 1024,

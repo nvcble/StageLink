@@ -5,8 +5,10 @@
 //! start/stop requests and impossible transitions are refused in one place
 //! rather than guarded ad hoc at every call site.
 
+pub mod join_code;
 pub mod roster;
 pub mod state;
 
+pub use join_code::JoinCode;
 pub use roster::{ReceiverRoster, RosterEntry};
 pub use state::{Session, SessionError, SessionState, TransitionOutcome};

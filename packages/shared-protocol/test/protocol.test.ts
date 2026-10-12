@@ -74,13 +74,19 @@ describe('method registry', () => {
       'stream.stop',
       'stream.getStatus',
       'receivers.list',
-      'receivers.approve',
+      'receivers.createJoinCode',
       'receivers.disconnect',
       'network.getStatus',
       'diagnostics.getSnapshot',
     ]) {
       expect(isMethodName(method), method).toBe(true)
     }
+  })
+
+  it('has no approval methods, because scanning the QR is the authorisation', () => {
+    expect(isMethodName('receivers.approve')).toBe(false)
+    expect(isMethodName('receivers.reject')).toBe(false)
+    expect(isMethodName('receivers.createPairingCode')).toBe(false)
   })
 
   it('rejects names that are not in the registry', () => {

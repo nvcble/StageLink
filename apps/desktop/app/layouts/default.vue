@@ -71,16 +71,7 @@ const audioLabel = computed(() => {
 
           <!-- Attention badges -->
           <UBadge
-            v-if="item.to === '/receivers' && receivers.hasPendingApprovals"
-            color="warning"
-            variant="subtle"
-            size="sm"
-            class="ml-auto"
-          >
-            {{ receivers.pendingRequests.length }}
-          </UBadge>
-          <UBadge
-            v-else-if="item.to === '/receivers' && receivers.connectedCount > 0"
+            v-if="item.to === '/receivers' && receivers.connectedCount > 0"
             color="neutral"
             variant="subtle"
             size="sm"

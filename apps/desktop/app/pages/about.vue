@@ -40,9 +40,14 @@ const capabilities = [
     note: 'Phase 3. The packetiser and per-receiver queues are implemented; the UDP sender is not.',
   },
   {
-    label: 'Receiver pairing and management',
+    label: 'Join codes and QR generation',
+    state: 'done' as const,
+    note: 'Real short-lived tokens and scannable QR codes, generated locally. Scanning authorises a device; no approval step.',
+  },
+  {
+    label: 'Accepting receiver connections',
     state: 'pending' as const,
-    note: 'Phase 5. Discovery, QR pairing and authorisation are specified but not implemented.',
+    note: 'Phase 3. The join code is honoured by the control server, which is not built yet.',
   },
   {
     label: 'Encrypted audio transport',
