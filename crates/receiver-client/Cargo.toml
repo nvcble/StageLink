@@ -1,0 +1,30 @@
+[package]
+name = "receiver-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The receiver side of the StageLink control channel, plus a headless receiver that joins a real desktop."
+
+[[bin]]
+name = "stagelink-receiver"
+path = "src/main.rs"
+
+[dependencies]
+audio-core = { workspace = true }
+audio-protocol = { workspace = true }
+desktop-ipc = { workspace = true }
+receiver-core = { workspace = true }
+
+anyhow = { workspace = true }
+clap = { workspace = true }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+hound = { workspace = true }
+parking_lot = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net", "io-util", "sync"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

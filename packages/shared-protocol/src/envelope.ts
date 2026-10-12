@@ -27,6 +27,16 @@ export const receiverIdentitySchema = z.object({
   appVersion: z.string().max(60).nullable(),
   /** Long-term public key, hex. Lets the device reconnect without a new code. */
   publicKey: z.string().min(1).max(256),
+  /**
+   * UDP port this receiver has **actually bound** for audio.
+   *
+   * Optional, and absent means "use the configured stream port" — which is
+   * what an older receiver implies. Sending it is better: the desktop then
+   * needs no assumption about where a receiver is listening, and two
+   * receivers sharing one IP address (two devices behind the same NAT, or two
+   * processes on one machine) do not collide on a single port.
+   */
+  audioPort: z.number().int().min(1).max(65_535).optional(),
 })
 export type ReceiverIdentity = z.infer<typeof receiverIdentitySchema>
 

@@ -19,22 +19,6 @@ pub type NotifyFn = Arc<dyn Fn(&str, Value) + Send + Sync>;
 
 use crate::state::{ServiceState, now_ms};
 
-/// Where a receiver's audio is sent.
-///
-/// The address the control connection came from, with the **stream port** from
-/// the configuration rather than the control connection's ephemeral source
-/// port. A receiver binds its audio socket to the port it advertised in the QR
-/// code; its control connection comes from whatever source port the OS handed
-/// it, which is not where it is listening for audio.
-fn audio_destination(
-    admission: &Admission,
-    stream_port: u16,
-) -> std::net::SocketAddr {
-    let mut address = admission.address;
-    address.set_port(stream_port);
-    address
-}
-
 /// Bridges the control server to the rest of the service.
 pub struct ServiceControlHost {
     state: Arc<ServiceState>,
@@ -182,7 +166,7 @@ impl ControlHost for ServiceControlHost {
         // Start sending audio, if a stream is running. If one is not, the
         // receiver is added when it starts.
         if let Some(active) = self.state.sender.lock().as_ref() {
-            let destination = audio_destination(admission, active.sender.config().stream_port);
+            let destination = admission.audio_destination(active.sender.config().stream_port);
             active
                 .sender
                 .add_destination(&admission.receiver_id, destination);
@@ -277,6 +261,7 @@ mod tests {
                 Some("0.1.0".to_owned()),
             ),
             address: "10.0.0.5:51000".parse().unwrap(),
+            audio_port: Some(45_872),
         }
     }
 
@@ -300,7 +285,7 @@ mod tests {
     fn audio_goes_to_the_stream_port_not_the_control_source_port() {
         let admission = admission("ab");
         assert_eq!(admission.address.port(), 51_000);
-        let destination = audio_destination(&admission, 45_872);
+        let destination = admission.audio_destination(45_872);
         assert_eq!(destination.port(), 45_872);
         assert_eq!(destination.ip(), admission.address.ip());
     }

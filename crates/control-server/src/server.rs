@@ -539,5 +539,6 @@ pub fn receiver_identity(
         platform_version: None,
         app_version: Some(app_version.to_owned()),
         public_key: public_key.to_owned(),
+        audio_port: None,
     }
 }

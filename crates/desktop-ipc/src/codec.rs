@@ -69,6 +69,15 @@ pub struct ReceiverIdentity {
     pub app_version: Option<String>,
     /// Long-term public key, hex. Not a secret.
     pub public_key: String,
+    /// UDP port this receiver has **actually bound** for audio.
+    ///
+    /// Absent means "use the configured stream port", which is what an older
+    /// receiver implies. Present is better and is what ours sends: the
+    /// desktop then needs no assumption about where a receiver is listening,
+    /// and two receivers sharing one IP address — two devices behind the same
+    /// NAT, or two processes on one machine — do not collide on a single port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_port: Option<u16>,
 }
 
 /// Audio parameters an admitted receiver needs.
@@ -319,6 +328,7 @@ mod tests {
                 platform_version: Some("14".into()),
                 app_version: Some("0.1.0".into()),
                 public_key: "ab".repeat(32),
+                audio_port: Some(45_872),
             }),
         });
         let line = envelope.encode().unwrap();

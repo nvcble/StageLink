@@ -48,16 +48,22 @@ FOH mixer ─ AUX send ─ USB interface ─ Windows desktop ─ Ethernet ─ Wi
 
 Stated plainly, because a monitor system you cannot trust is worse than none:
 
-- **Audio does not reach phones yet.** The packet format, packetiser and
-  per-receiver queues are built and tested; the UDP sender is Phase 3. Real
-  StageLink packets *do* now travel over a real socket between
-  `reference-transmitter` and `test-receiver` — see
-  [docs/testing.md](docs/testing.md) — which is how the receiver is being built
-  ahead of the sender, but no audio leaves the desktop application.
-- **Receivers cannot connect yet.** The join QR is real and final, but the
-  control server that honours it is Phase 5.
-- **The encrypted transport is not implemented.** Phase 5. The plaintext
-  transport is refused in release builds.
+- **Audio now reaches a receiver, end to end.** `scripts/end-to-end.mjs`
+  captures from a real interface, streams over a real socket, and three
+  concurrent headless receivers join over the real control channel and record
+  listenable WAVs. What is missing is the *phone*: there is no mobile app yet,
+  and the receiver is a command-line tool.
+- **There is no mobile app.** The receiver's whole audio path and control
+  client are written and tested (`receiver-core`, `receiver-client`), but there
+  is no Flutter project, no Android build and no audio sink — so nothing a
+  performer can install.
+- **The encrypted transport is not implemented**, and it is the only one a
+  release build will carry. The sender sets the flag and reserves the AEAD tag
+  region, but nothing seals the payload, so end-to-end testing needs a
+  development build and a packaged installer will refuse to stream.
+- **Latency has never been measured.** The design target is 40–90 ms; nothing
+  in this repository has measured it, and doing so needs a phone and a
+  physical loopback.
 
 Control methods for unfinished features return `NOT_IMPLEMENTED` naming the
 phase, never a plausible-looking success. See

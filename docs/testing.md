@@ -8,11 +8,11 @@ someone's ears.
 
 | Layer | Count | Needs hardware? |
 | --- | --- | --- |
-| Rust unit and integration | 499 | Mostly no — see below |
+| Rust unit and integration | 606 | Mostly no — see below |
 | `@stagelink/shared-protocol` | 43 | No |
 | Electron / desktop | 62 | No |
 | Cross-implementation protocol | 22 | No (spawns the Rust probe) |
-| **Total automated** | **626** | |
+| **Total automated** | **733** | |
 | Desktop smoke test | 44 checks | Launches the real app |
 | Physical audio verification | manual | **Yes** |
 | Multi-receiver streaming | manual | **Yes, and Phases 3 + 5** |
@@ -195,6 +195,46 @@ service.
 **What it cannot tell you:** how it sounds on a given phone, and what the real
 output latency is. Those need hardware — see
 [`latency-measurement.md`](latency-measurement.md).
+
+## End to end: a real desktop, a real join, real audio
+
+`scripts/end-to-end.mjs` is the test that cannot be faked by any of the others.
+It spawns the real service, drives it over its named pipe exactly as Electron
+does, selects a real network adapter and a real capture device, mints a join
+code, starts a stream, and then runs one or more `stagelink-receiver`
+processes which join over the real control channel and record what they hear.
+
+```bash
+node scripts/end-to-end.mjs                   # one receiver
+node scripts/end-to-end.mjs --receivers 3     # the multi-receiver claim
+node scripts/end-to-end.mjs --device "NUX"    # a named audio interface
+node scripts/end-to-end.mjs --seconds 60      # a longer soak
+```
+
+Every other test in this repository checks one side of a boundary. This one
+puts audio in at the desktop and takes a listenable WAV out at the receiver,
+through the real packetiser, the real socket, the real join handshake and the
+real jitter buffer.
+
+**Verified, 2026-10-12:** three concurrent receivers each joined, appeared in
+the roster, received packets with no loss, reported telemetry the desktop
+labelled `receiver-reported`, and wrote a WAV. The desktop reported its own
+send counters with no failures.
+
+Two things to know:
+
+- **It asks for the plaintext transport**, which a development build permits
+  and a release build refuses. The encrypted transport is the default and the
+  only one a release build will carry, and the key exchange is not implemented
+  yet — so until it is, this test cannot run against a packaged installer.
+- **A line input with nothing plugged in captures digital silence.** The script
+  runs `audio.test` on each device and prefers one with signal; when none has
+  any, it says so and verifies delivery rather than failing on a missing cable.
+
+`stagelink-receiver` is not a simulation of the mobile app. It is the app's own
+lower half — the same `receiver-client` and the same `receiver-core` — with a
+WAV file where the audio sink will be. That is why testing it proves something
+about the app.
 
 ## The desktop smoke test
 

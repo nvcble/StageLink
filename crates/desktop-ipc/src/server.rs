@@ -456,6 +456,7 @@ mod tests {
             platform_version: Some("14".into()),
             app_version: Some("0.1.0".into()),
             public_key: "aa".repeat(32),
+            audio_port: None,
         };
         writer
             .write_all(hello_from(&config.token, "1.0.0", Some(receiver)).as_bytes())

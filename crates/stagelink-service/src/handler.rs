@@ -1397,6 +1397,7 @@ mod tests {
                 Some("0.1.0".to_owned()),
             ),
             address: "10.0.0.5:51000".parse().unwrap(),
+            audio_port: Some(45_872),
         };
         control_server::server::ControlHost::on_joined(&host, &admission);
         admission.receiver_id

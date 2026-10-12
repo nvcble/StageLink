@@ -16,6 +16,7 @@ members = [
     "reference-transmitter",
     "receiver-core",
     "receiver-harness",
+    "receiver-client",
 ]
 
 [workspace.package]
@@ -40,6 +41,7 @@ desktop-ipc = { path = "desktop-ipc" }
 control-server = { path = "control-server" }
 reference-transmitter = { path = "reference-transmitter" }
 receiver-core = { path = "receiver-core" }
+receiver-client = { path = "receiver-client" }
 receiver-harness = { path = "receiver-harness" }
 
 # Async runtime. `net` brings in the Windows named-pipe types used by desktop-ipc.

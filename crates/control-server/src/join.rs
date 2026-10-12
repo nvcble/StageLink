@@ -60,7 +60,25 @@ pub struct Admission {
     /// Desktop-assigned, stable for as long as the device keeps its key.
     pub receiver_id: String,
     pub identity: ReceiverIdentity,
+    /// Where the control connection came from.
     pub address: SocketAddr,
+    /// The UDP port the receiver said it is listening on, if it said.
+    pub audio_port: Option<u16>,
+}
+
+impl Admission {
+    /// Where to send this receiver's audio.
+    ///
+    /// The receiver's own port when it declared one, the configured stream
+    /// port otherwise. Never the control connection's source port, which is
+    /// an ephemeral port the OS picked and is not where anything is
+    /// listening.
+    #[must_use]
+    pub fn audio_destination(&self, configured_stream_port: u16) -> SocketAddr {
+        let mut address = self.address;
+        address.set_port(self.audio_port.unwrap_or(configured_stream_port));
+        address
+    }
 }
 
 /// Everything the decision depends on.
@@ -131,6 +149,7 @@ pub fn admit(
             receiver.app_version.clone(),
         ),
         address: request.address,
+        audio_port: receiver.audio_port,
     })
 }
 
@@ -181,6 +200,7 @@ mod tests {
             platform_version: Some("14".to_owned()),
             app_version: Some("0.1.0".to_owned()),
             public_key: "ab".repeat(32),
+            audio_port: Some(45_872),
         }
     }
 
@@ -359,6 +379,77 @@ mod tests {
         let error = admit(&request, Some(&code), OURS, 0, 16, never_revoked)
             .expect_err("the local client is not a receiver");
         assert_eq!(error, JoinError::NotAReceiver);
+    }
+
+    /// Where audio goes. Never the control connection's source port, which is
+    /// ephemeral and is not where anything is listening.
+    #[test]
+    fn audio_goes_to_the_port_the_receiver_declared() {
+        let code = code();
+        let identity = identity();
+        let admission = admit(
+            &request(&code.token, &identity),
+            Some(&code),
+            OURS,
+            0,
+            16,
+            never_revoked,
+        )
+        .unwrap();
+
+        assert_eq!(admission.audio_port, Some(45_872));
+        let destination = admission.audio_destination(45_872);
+        assert_eq!(destination.ip(), address().ip());
+        assert_eq!(destination.port(), 45_872);
+        assert_ne!(destination.port(), address().port(), "not the source port");
+    }
+
+    /// Two receivers behind one IP address — two devices behind the same NAT,
+    /// or two processes on one machine — must not be sent to the same port.
+    #[test]
+    fn two_receivers_sharing_an_address_get_their_own_ports() {
+        let code = code();
+        let mut first = identity();
+        first.audio_port = Some(45_872);
+        let mut second = identity();
+        second.public_key = "cd".repeat(32);
+        second.audio_port = Some(51_001);
+
+        let admit_one = |identity: &WireIdentity| {
+            admit(
+                &request(&code.token, identity),
+                Some(&code),
+                OURS,
+                0,
+                16,
+                never_revoked,
+            )
+            .unwrap()
+        };
+
+        let a = admit_one(&first).audio_destination(45_872);
+        let b = admit_one(&second).audio_destination(45_872);
+        assert_eq!(a.ip(), b.ip(), "same machine");
+        assert_ne!(a.port(), b.port(), "but their own audio ports");
+    }
+
+    /// An older receiver that does not declare a port still works: the
+    /// configured stream port is the documented default.
+    #[test]
+    fn a_receiver_that_declares_no_port_falls_back_to_the_configured_one() {
+        let code = code();
+        let mut identity = identity();
+        identity.audio_port = None;
+        let admission = admit(
+            &request(&code.token, &identity),
+            Some(&code),
+            OURS,
+            0,
+            16,
+            never_revoked,
+        )
+        .unwrap();
+        assert_eq!(admission.audio_destination(45_872).port(), 45_872);
     }
 
     /// The property that makes the operator's label and a revocation survive a
