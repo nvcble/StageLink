@@ -83,7 +83,9 @@ async function openRepository() {
     <SharedStagePanel title="Build" icon="i-lucide-package">
       <dl class="grid grid-cols-2 gap-4 text-sm">
         <div>
-          <dt class="text-xs text-stage-muted">Application</dt>
+          <!-- StageLink Core and StageLink Mobile version independently, so a
+               performer's app number will not usually match this one. -->
+          <dt class="text-xs text-stage-muted">StageLink Core</dt>
           <dd class="selectable stage-numeric mt-0.5">{{ runtime?.appVersion ?? '—' }}</dd>
         </div>
         <div>

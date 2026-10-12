@@ -10,6 +10,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../state/session_controller.dart';
 import 'theme.dart';
+import 'version_label.dart';
 
 class JoinScreen extends ConsumerStatefulWidget {
   const JoinScreen({super.key});
@@ -107,6 +108,8 @@ class _JoinScreenState extends ConsumerState<JoinScreen> {
                   const SizedBox(height: 20),
                   _FailureNotice(message: session.failure!.message),
                 ],
+                const SizedBox(height: 16),
+                const VersionLabel(),
               ],
             ),
           ),

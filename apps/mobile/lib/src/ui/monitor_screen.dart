@@ -20,6 +20,7 @@ import '../ffi/receiver.dart';
 import '../state/monitor_settings.dart';
 import '../state/session_controller.dart';
 import 'theme.dart';
+import 'version_label.dart';
 
 class MonitorScreen extends ConsumerWidget {
   const MonitorScreen({super.key});
@@ -430,6 +431,8 @@ class _DiagnosticsSheet extends ConsumerWidget {
             'measured from here.',
             style: Theme.of(context).textTheme.bodySmall,
           ),
+          const SizedBox(height: 16),
+          const VersionLabel(),
         ],
       ),
     );

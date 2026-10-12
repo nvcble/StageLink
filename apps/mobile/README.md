@@ -36,6 +36,14 @@ The NDK path lives in `crates/.cargo/config.toml`. `cargo-ndk` would normally
 set it; version 4.1.2 panics on this workspace, and configuring it directly
 means a wrong path is an error you can read.
 
+The launcher icons are generated from the official logo and committed, so a
+normal build does not regenerate them. After changing
+`assets/branding/StageLink-Logo.png`:
+
+```powershell
+dart run flutter_launcher_icons
+```
+
 ## Testing
 
 ```bash
@@ -105,6 +113,26 @@ profile sets `panic = "abort"`, which is right for a standalone service and
 wrong here: `receiver-ffi` catches panics at every `extern "C"` entry point so
 one cannot unwind into Dart or Kotlin, and `catch_unwind` does nothing under
 `abort`.
+
+**The receiver cdylib must carry a SONAME**, which
+`crates/receiver-ffi/build.rs` sets for Android targets. Rust does not emit one
+by default, and the Oboe shim links against the library by absolute path
+through a CMake `IMPORTED` target — so with no `DT_SONAME` the linker records
+*the build machine's path* as the shim's `DT_NEEDED` entry. The app then fails
+`System.loadLibrary("stagelink_sink")` inside `AudioSink`'s static initialiser
+and dies before the first frame: an APK that installs cleanly and will not
+open, on every device, with nothing on screen to say why. Check it before
+shipping an APK:
+
+```bash
+# Must print a bare filename, never a path
+unzip -p app-release.apk lib/arm64-v8a/libstagelink_sink.so |
+  grep -a -o -E "[/A-Za-z0-9_.:-]*libstagelink_receiver\.so" | sort -u
+```
+
+`MainActivity` now also catches a failed load and reports it over the method
+channel instead of crashing, so the next problem of this shape is a message a
+performer can read out rather than an app that does nothing.
 
 ## What has not been verified
 

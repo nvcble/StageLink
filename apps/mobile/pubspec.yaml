@@ -5,7 +5,7 @@ description: >-
   receiver-client) behind a narrow C ABI; this app is the screen in front of
   them.
 publish_to: none
-version: 0.1.0+1
+version: 0.1.1+2
 
 environment:
   sdk: ^3.12.0
@@ -58,5 +58,29 @@ dev_dependencies:
   freezed: ^3.2.3
   json_serializable: ^6.9.5
 
+  # Generates the launcher icons from the official logo; see the config below.
+  flutter_launcher_icons: ^0.14.4
+
 flutter:
   uses-material-design: true
+
+# Launcher icons, generated from the official logo.
+#
+# `assets/branding/StageLink-Logo.png` is the project's visual identity and is
+# only ever read — the mipmaps under android/app/src/main/res are the derived
+# files. Regenerate after changing it:
+#
+#   dart run flutter_launcher_icons
+flutter_launcher_icons:
+  android: ic_launcher
+  image_path: ../../assets/branding/StageLink-Logo.png
+  min_sdk_android: 29
+
+  # Adaptive, because Android 8+ masks every icon to whatever shape the
+  # launcher has chosen. The background is the logo's own backdrop colour
+  # (StageColours.background), so the seam is invisible on any mask; the
+  # foreground is inset because only the centre of it survives a circular one,
+  # and an un-inset logo loses the ends of the waveform.
+  adaptive_icon_background: "#080B16"
+  adaptive_icon_foreground: ../../assets/branding/StageLink-Logo.png
+  adaptive_icon_foreground_inset: 20

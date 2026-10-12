@@ -108,6 +108,39 @@ node scripts/renderer-console.mjs
 node scripts/sync-icon-bundle.mjs
 ```
 
+## Versioning
+
+`versions.json` at the repo root is the single source of truth, and
+`scripts/version.mjs` is the only thing that writes it or the manifests it
+feeds. Hand-editing a version in `package.json`, `pubspec.yaml` or
+`version.dart` fails `npm test`, which runs `--check` first.
+
+```bash
+npm run version:show                      # what the two apps are on
+npm run version:check                     # are the manifests in step?
+node scripts/version.mjs bugs mobile      # 0.1.0 -> 0.1.1, mobile only
+node scripts/version.mjs features         # both apps
+node scripts/version.mjs prod desktop
+```
+
+`1.2.3` is `prod.features.bugs`, and bumping a segment resets the ones below
+it. There is a `/version-update` skill that wraps this.
+
+**StageLink Core and StageLink Mobile version independently**, because they
+ship independently: a phone-only fix should not move the installer's number,
+and an operator and a performer will routinely be on different numbers. Each
+app shows its own — the About page's "StageLink Core" field, and
+`VersionLabel` on the mobile join screen and diagnostics sheet. The desktop
+also shows each connected receiver's app version in the roster, which is how
+an operator answers "what are you running?" without asking.
+
+`crates/Cargo.toml`'s workspace version is neither app's number. The same
+crates ship inside both, so it is the **engine** version and the script leaves
+it alone; the About page shows it separately as "Audio service".
+
+Android's `versionCode` must strictly increase, so `mobile.build` increments on
+every mobile bump and is never derived from the version.
+
 ## Things worth knowing before you change them
 
 **TypeScript is pinned to 6.x.** TypeScript 7 removed `typescript/lib/tsc`,

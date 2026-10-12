@@ -240,7 +240,10 @@ export class ServiceSupervisor extends EventEmitter {
           v: 1,
           kind: 'hello',
           token: this.#token,
-          client: `stagelink-desktop/${process.env.npm_package_version ?? '0.1.0'}`,
+          // Set from `app.getVersion()` at startup. `npm_package_version` only
+          // exists when launched through npm, so it is the fallback, not the
+          // source — the service log should not claim a version we guessed.
+          client: `stagelink-desktop/${process.env.STAGELINK_APP_VERSION ?? process.env.npm_package_version ?? 'unknown'}`,
           controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
         })}\n`,
       )

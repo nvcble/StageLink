@@ -20,9 +20,12 @@
     "build:service": "cargo build --release --manifest-path crates/Cargo.toml",
     "package": "npm run build && npm run build:service && npm run package --workspace @stagelink/desktop",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
+    "test": "node scripts/version.mjs --check && npm run test --workspaces --if-present",
     "test:rust": "cargo test --manifest-path crates/Cargo.toml",
     "lint": "npm run lint --workspaces --if-present",
+    "version:show": "node scripts/version.mjs",
+    "version:check": "node scripts/version.mjs --check",
+    "version:sync": "node scripts/version.mjs --sync",
     "icons": "node scripts/generate-icons.mjs",
     "clean": "node scripts/clean.mjs",
     "test:protocol": "npm run test --workspace @stagelink/tests"

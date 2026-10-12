@@ -12,6 +12,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../audio/sink_channel.dart';
 import '../data/identity.dart';
 import '../ffi/receiver.dart';
+// Prefixed because the field this fills is also called `appVersion`.
+import '../version.dart' as version;
 import 'monitor_settings.dart';
 
 /// How often the stats are polled.
@@ -96,7 +98,7 @@ class SessionController extends Notifier<SessionState> {
     NativeReceiver? receiver,
     IdentityStore? identityStore,
     AudioSinkChannel? sink,
-    this.appVersion = '0.1.0',
+    this.appVersion = version.appVersion,
     this.deviceName = 'StageLink Mobile',
     this.platform = 'android',
     this.ephemeralAudioPort = false,

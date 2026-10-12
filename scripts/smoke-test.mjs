@@ -17,7 +17,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
@@ -26,6 +26,9 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(here, '..')
 const desktopDir = path.join(repoRoot, 'apps', 'desktop')
 const outputDir = path.join(repoRoot, 'tests', 'integration', 'artifacts')
+
+/** What `versions.json` says the desktop is, which the About page must agree with. */
+const desktopVersion = JSON.parse(readFileSync(path.join(repoRoot, 'versions.json'), 'utf8')).desktop.version
 
 const production = process.argv.includes('--production')
 const DEBUG_PORT = 9229
@@ -491,6 +494,23 @@ async function main() {
       await delay(400)
       const pathname = await cdp.evaluate('window.location.pathname')
       check(`client-side routing reaches ${route}`, pathname === route, String(pathname))
+
+      // A version an operator can read off the screen, and the *right* one.
+      // `app.getVersion()` silently falls back to Electron's own version when
+      // the manifest is missing a version, which looks entirely plausible.
+      if (route === '/about') {
+        const shown = await cdp.evaluate(
+          `(() => {
+            const dt = [...document.querySelectorAll('dt')].find((n) => n.textContent.trim() === 'StageLink Core')
+            return dt?.nextElementSibling?.textContent?.trim() ?? null
+          })()`,
+        )
+        check(
+          'the About page shows the desktop version from versions.json',
+          shown === desktopVersion,
+          `shown "${shown}", versions.json says "${desktopVersion}"`,
+        )
+      }
     }
     await navigate(cdp, '/')
     await delay(600)

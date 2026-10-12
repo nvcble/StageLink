@@ -26,7 +26,9 @@ import {
  */
 
 const runtime: BridgeRuntimeInfo = {
-  appVersion: process.env.STAGELINK_APP_VERSION ?? '0.1.0',
+  // `app.getVersion()`, via main. A literal fallback here would eventually be a
+  // stale number presented as fact, which is worse than admitting we lost it.
+  appVersion: process.env.STAGELINK_APP_VERSION ?? 'unknown',
   controlProtocolVersion: CONTROL_PROTOCOL_VERSION,
   audioProtocolVersion: AUDIO_PROTOCOL_VERSION,
   electronVersion: process.versions.electron ?? 'unknown',

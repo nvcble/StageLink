@@ -1,6 +1,7 @@
 package nz.co.stagelink.stagelink_mobile
 
 import android.os.Bundle
+import android.util.Log
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -15,7 +16,9 @@ import io.flutter.plugin.common.MethodChannel
  */
 class MainActivity : FlutterActivity() {
 
-    private lateinit var sink: AudioSink
+    /** Null when the native libraries would not load; [sinkFailure] says why. */
+    private var sink: AudioSink? = null
+    private var sinkFailure: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -26,11 +29,30 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        sink = AudioSink(applicationContext)
+
+        // `AudioSink`'s static initialiser calls `System.loadLibrary`, and an
+        // UnsatisfiedLinkError here used to take the activity down before the
+        // first frame — an app that will not open, with nothing on screen to
+        // say why. Audio is impossible either way, but "the audio output is
+        // unavailable: <reason>" is something a performer can report.
+        sink = try {
+            AudioSink(applicationContext)
+        } catch (error: Throwable) {
+            Log.e(TAG, "the native audio sink would not load", error)
+            sinkFailure = error.message ?: error.toString()
+            null
+        }
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call, result ->
-                when (call.method) {
+                val sink = this.sink
+                if (sink == null) {
+                    result.error(
+                        "audio_output",
+                        "the audio output is unavailable: ${sinkFailure ?: "unknown reason"}",
+                        null,
+                    )
+                } else when (call.method) {
                     "start" -> {
                         // The handle is a pointer Dart got from `slr_join`.
                         // Passed as a long because that is what crosses JNI;
@@ -70,11 +92,12 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
-        if (::sink.isInitialized) sink.stop()
+        sink?.stop()
         super.onDestroy()
     }
 
     companion object {
         const val CHANNEL = "nz.co.stagelink/audio_sink"
+        private const val TAG = "StageLinkMain"
     }
 }

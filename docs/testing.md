@@ -12,9 +12,9 @@ someone's ears.
 | `@stagelink/shared-protocol` | 43 | No |
 | Electron / desktop | 62 | No |
 | Cross-implementation protocol | 22 | No (spawns the Rust probe) |
-| Flutter / mobile | 32 | No (18 drive the real native library) |
-| **Total automated** | **808** | |
-| Desktop smoke test | 44 checks | Launches the real app |
+| Flutter / mobile | 34 | No (18 drive the real native library) |
+| **Total automated** | **810** | |
+| Desktop smoke test | 45 checks | Launches the real app |
 | Physical audio verification | manual | **Yes** |
 | Multi-receiver streaming | manual | **Yes, and Phases 3 + 5** |
 
@@ -257,7 +257,10 @@ asserts that the whole stack came up:
   looks to an operator, and it is indistinguishable from lost settings,
 - icons render from bundled data URIs, not from the network,
 - an unregistered method is refused,
-- client-side routing works on every page.
+- client-side routing works on every page,
+- the version on the About page is the one in `versions.json` — `app.getVersion()`
+  falls back to *Electron's* version when a manifest has none, which looks
+  entirely plausible on screen.
 
 It captures a PNG of the **application window** (via CDP, not a screen grab)
 into `tests/integration/artifacts/`.
