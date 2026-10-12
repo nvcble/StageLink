@@ -14,6 +14,7 @@ members = [
     "test-receiver",
     "reference-transmitter",
     "receiver-core",
+    "receiver-harness",
 ]
 
 [workspace.package]
@@ -37,6 +38,7 @@ persistence = { path = "persistence" }
 desktop-ipc = { path = "desktop-ipc" }
 reference-transmitter = { path = "reference-transmitter" }
 receiver-core = { path = "receiver-core" }
+receiver-harness = { path = "receiver-harness" }
 
 # Async runtime. `net` brings in the Windows named-pipe types used by desktop-ipc.
 tokio = { version = "1.53", features = [

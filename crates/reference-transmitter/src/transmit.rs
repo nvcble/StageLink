@@ -68,6 +68,16 @@ pub struct TransmitConfig {
 }
 
 impl TransmitConfig {
+    /// Whether a packet duration fits one unfragmented datagram.
+    ///
+    /// Exposed because every tool that offers a `--frame-ms` flag needs the
+    /// same answer, and the alternative is each one hard-coding the list and
+    /// one of them going stale.
+    #[must_use]
+    pub fn is_supported_frame_duration(millis: f64) -> bool {
+        stream_server::config::SUPPORTED_FRAME_DURATIONS_MS.contains(&millis)
+    }
+
     #[must_use]
     pub fn frames_per_packet(&self) -> usize {
         frames_per_packet(self.sample_rate, self.frame_duration_ms)
@@ -165,6 +175,34 @@ impl Transmitter {
             report: TransmitReport { sessions: 1, ..TransmitReport::default() },
             config,
         }
+    }
+
+    /// Builds one datagram with no pacing and no impairment.
+    ///
+    /// For a caller that owns the clock — `receiver-harness` runs a virtual
+    /// one, so that a 90-minute drift scenario takes a few seconds rather than
+    /// 90 minutes. Returns `None` once the source is exhausted.
+    pub fn next_datagram(&mut self) -> Option<Vec<u8>> {
+        if self.exhausted {
+            return None;
+        }
+        self.build_next()
+    }
+
+    /// Whether the source has produced its last frames.
+    #[must_use]
+    pub const fn is_exhausted(&self) -> bool {
+        self.exhausted
+    }
+
+    /// The end-of-stream marker, for a caller driving packets itself.
+    pub fn end_of_stream_datagram(&mut self) -> Vec<u8> {
+        self.builder.end_of_stream(self.config.encrypted).to_vec()
+    }
+
+    /// Starts a new session, for a caller driving packets itself.
+    pub fn rotate_session_now(&mut self) {
+        self.rotate_session();
     }
 
     /// Builds the next datagram, or `None` if the ring was short — which

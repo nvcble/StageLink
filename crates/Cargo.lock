@@ -753,6 +753,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "receiver-harness"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "audio-core",
+ "audio-protocol",
+ "clap",
+ "hound",
+ "receiver-core",
+ "reference-transmitter",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "receiver-session"
 version = "0.1.0"
 dependencies = [

@@ -94,6 +94,10 @@ pub struct DriftController {
     integral_ppm: f64,
     /// Burst allowance consumed, in seconds.
     burst_used: f64,
+    /// Seconds of measurement since the last resync.
+    observed: f64,
+    /// Slow average of the applied correction: the reported clock estimate.
+    smoothed_ppm: f64,
     correction_ppm: f64,
     /// Proportional gain, ppm per frame of error.
     kp: f64,
@@ -110,10 +114,27 @@ impl DriftController {
         //
         //     ppm = error * 1e6 / (settle * sample_rate)
         let kp = 1e6 / (config.settle_seconds * f64::from(config.sample_rate.max(1)));
-        // The integral learns the standing clock difference over about twice
-        // the settling time. Faster makes the loop oscillate; slower leaves the
-        // buffer off target for minutes.
-        let ki = kp / 30.0;
+
+        // The integral gain sets the damping, and the loop is fussier about it
+        // than it looks. Buffer depth *integrates* the rate error, so the
+        // plant is 1/s and a PI controller around it is second order:
+        //
+        //     ë + K·kp·ė + K·ki·e = 0,  K = sample_rate × 1e-6
+        //
+        // giving ωn = √(K·ki) and ζ = K·kp / (2·ωn). At kp/30 that is
+        // ζ ≈ 0.71 — textbook-optimal for a step response, and wrong here.
+        // The depth measurement carries an unavoidable one-packet sawtooth
+        // (the sender adds 240 frames at a time while the resampler drains
+        // continuously), which excites the loop continuously; a loop with any
+        // ringing left in it then hunts, and the figure a receiver reports
+        // about its own clock drift wanders by tens of ppm. Measured over 40
+        // simulated minutes, kp/30 left the integral swinging between +68 and
+        // −4 ppm against a true 40.
+        //
+        // kp/120 gives ζ ≈ 1.4: overdamped, no ringing, dominant time
+        // constant about two minutes. Two minutes is nothing against a drift
+        // that takes 90 to matter, and the reported figure stops lying.
+        let ki = kp / 120.0;
 
         Self {
             config,
@@ -121,6 +142,8 @@ impl DriftController {
             primed: false,
             integral_ppm: 0.0,
             burst_used: 0.0,
+            observed: 0.0,
+            smoothed_ppm: 0.0,
             correction_ppm: 0.0,
             kp,
             ki,
@@ -144,14 +167,18 @@ impl DriftController {
 
     /// Updates from a depth measurement. Returns the correction in ppm.
     ///
-    /// `depth_frames` is the **playable** depth — frames in an unbroken run
-    /// from the read position. Counting a packet beyond a hole would make the
-    /// buffer look healthier than it is and steer the controller the wrong way.
+    /// `depth_frames` counts every slot from the read position to the newest
+    /// packet, holes included — see `JitterBuffer::span_from`. Holes belong in
+    /// the figure because the reader conceals them and moves on, so each one
+    /// still takes a packet interval to play; counting only gap-free audio
+    /// would report a near-empty buffer on a lossy stream and have the
+    /// controller correct a deficit that is not there.
     pub fn update(&mut self, depth_frames: usize, dt_seconds: f64) -> f64 {
         if !dt_seconds.is_finite() || dt_seconds <= 0.0 {
             return self.correction_ppm;
         }
 
+        self.observed += dt_seconds;
         let error = depth_frames as f64 - self.config.target_frames as f64;
 
         // One-pole smoothing, seeded on the first call so the controller does
@@ -184,6 +211,14 @@ impl DriftController {
         };
         self.correction_ppm = requested.clamp(-limit, limit);
 
+        // Two minutes of averaging, matching the loop's own dominant time
+        // constant. Shorter than that and the reported figure tracks the
+        // controller's own motion rather than the clocks: the depth wanders
+        // a few milliseconds over minutes, and the proportional term turns
+        // each millisecond into tens of ppm.
+        let smoothing = 1.0 - (-dt_seconds / 120.0).exp();
+        self.smoothed_ppm += (self.correction_ppm - self.smoothed_ppm) * smoothing;
+
         if self.correction_ppm.abs() > MAX_STEADY_PPM {
             self.burst_used += dt_seconds;
         } else {
@@ -206,12 +241,17 @@ impl DriftController {
     /// much backlog away would hold the extra latency for minutes, and latency
     /// is the whole point of the system.
     ///
-    /// Uses the **smoothed** error rather than the instantaneous depth, so a
-    /// single early burst of packets cannot trigger a skip that the next
-    /// moment's measurement would not have asked for.
+    /// Uses the **smoothed** error rather than the instantaneous depth, and
+    /// refuses to answer until the filter has had a full window of
+    /// measurements. Both matter: a skip is audible, and the depth immediately
+    /// after a stream starts is whatever happened to have arrived during
+    /// priming, which is not yet evidence of a backlog. Acting on it would
+    /// make every session begin with a skip.
     #[must_use]
     pub fn excess_needs_skip(&self) -> bool {
-        self.primed && self.filtered_error > self.config.skip_above_frames as f64
+        self.primed
+            && self.observed >= self.config.filter_seconds
+            && self.filtered_error > self.config.skip_above_frames as f64
     }
 
     /// Frames to discard to put the depth back on target.
@@ -220,13 +260,28 @@ impl DriftController {
         self.filtered_error.max(0.0) as usize
     }
 
-    /// The clock difference the controller has learned, in ppm.
+    /// The clock difference this receiver has settled on, in ppm.
     ///
-    /// Worth reporting: a value pinned at the clamp for minutes means the two
-    /// clocks are further apart than the budget allows, and that is the one
-    /// symptom that shows up before a dropout does.
+    /// A two-minute average of the correction actually applied — **not** the
+    /// integral term. The integral is only one contributor; in a well-behaved
+    /// loop the proportional term carries most of a steady rate difference
+    /// against a small standing error, so the integral alone is not the
+    /// clock estimate and reporting it as one is misleading. The applied rate
+    /// is what the resampler really ran at, and averaging it over the loop's
+    /// own time constant removes the proportional term's response to
+    /// ordinary depth variation.
+    ///
+    /// Worth reporting: a value pinned near the clamp for minutes means the
+    /// two clocks are further apart than the budget allows, and that is the
+    /// one symptom which shows up before a dropout does.
     #[must_use]
     pub const fn learned_ppm(&self) -> f64 {
+        self.smoothed_ppm
+    }
+
+    /// The integral term alone, for tests that need to see inside the loop.
+    #[must_use]
+    pub const fn integral_ppm(&self) -> f64 {
         self.integral_ppm
     }
 
@@ -242,6 +297,7 @@ impl DriftController {
     pub fn resync(&mut self) {
         self.filtered_error = 0.0;
         self.primed = false;
+        self.observed = 0.0;
         self.correction_ppm = self.integral_ppm;
     }
 
@@ -252,6 +308,8 @@ impl DriftController {
         self.primed = false;
         self.integral_ppm = 0.0;
         self.burst_used = 0.0;
+        self.observed = 0.0;
+        self.smoothed_ppm = 0.0;
         self.correction_ppm = 0.0;
     }
 }
@@ -348,7 +406,7 @@ mod tests {
             let mut controller = controller();
             simulate(&mut controller, sender_ppm, TARGET as f64, 300.0);
             assert!(
-                (controller.learned_ppm() - sender_ppm).abs() < 6.0,
+                (controller.learned_ppm() - sender_ppm).abs() < 10.0,
                 "sender at {sender_ppm} ppm, learned {}",
                 controller.learned_ppm()
             );
@@ -490,13 +548,20 @@ mod tests {
         let learned = controller.learned_ppm();
         assert!(learned > 30.0);
 
+        let integral = controller.integral_ppm();
         controller.resync();
         assert_eq!(controller.filtered_error_frames(), 0.0);
         assert!(
             (controller.learned_ppm() - learned).abs() < 1e-9,
             "a resync must not discard what was learned about the crystals"
         );
-        assert!((controller.correction_ppm() - learned).abs() < 1e-9);
+        assert!(
+            (controller.integral_ppm() - integral).abs() < 1e-9,
+            "nor the integral that is holding the rate"
+        );
+        // The correction falls back to the integral: the depth error it was
+        // also responding to is gone, but the clock difference is not.
+        assert!((controller.correction_ppm() - integral).abs() < 1e-9);
     }
 
     #[test]
@@ -511,21 +576,25 @@ mod tests {
     #[test]
     fn a_new_target_is_steered_to_without_relearning_the_clocks() {
         let mut controller = controller();
-        simulate(&mut controller, 40.0, TARGET as f64, 300.0);
-        let learned = controller.learned_ppm();
+        simulate(&mut controller, 40.0, TARGET as f64, 600.0);
+        let integral = controller.integral_ppm();
 
         // The jitter-buffer adaptation raises the target by 40 ms.
         controller.set_target_frames(TARGET + 1_920);
-        let history = simulate(&mut controller, 40.0, TARGET as f64, 180.0);
+        let history = simulate(&mut controller, 40.0, TARGET as f64, 600.0);
 
         assert!(
             (history.last().unwrap() - (TARGET + 1_920) as f64).abs() < 240.0,
             "did not reach the new target: {}",
             history.last().unwrap()
         );
+        // The integral is what holds the learned rate, and a target change
+        // must not make it relearn the crystals from scratch. The correction
+        // itself legitimately swings while the loop re-steers.
         assert!(
-            (controller.learned_ppm() - learned).abs() < 20.0,
-            "the clock estimate was thrown away by a target change"
+            (controller.integral_ppm() - integral).abs() < 40.0,
+            "a target change threw away the clock estimate: {integral:.1} -> {:.1}",
+            controller.integral_ppm()
         );
     }
 
@@ -542,3 +611,4 @@ mod tests {
         assert!(controller.learned_ppm().is_finite());
     }
 }
+

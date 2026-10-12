@@ -296,7 +296,7 @@ Ordered so that everything hard is proven **before** any hardware is required.
 | --- | --- | --- |
 | **M0** | Spec fixes and shipped-defect fixes (D1–D6, contradictions), each with a failing test first. **Protocol work complete**; D3's fix waits on M6, and the UDP sender, control server and reference transmitter are M1/M6/M7 | — |
 | **M1** | `crates/reference-transmitter` — WAV/tone replay with injectable loss, bursts, reorder, duplicates, outages, `sessionId` change, `--clock-ppm`, `--seed`. **Done**, and verified against `test-receiver` over a real socket | — |
-| **M2** | `crates/receiver-core` as a pure library + `receiver-harness` with a simulated DAC clock. De-jitter, concealment, resampler, drift controller, EQ, limiter, telemetry. **~80% of the hard code.** | — |
+| **M2** | `crates/receiver-core` as a pure library + `receiver-harness` with a simulated DAC clock. De-jitter, concealment, resampler, drift controller, EQ, limiter, telemetry. **~80% of the hard code. Done**, less adaptive depth, which is M4 | — |
 | **M3** | C ABI + cbindgen + ffigen, built as a **Windows DLL**, driven by Dart tests on desktop | — |
 | **M4** | Android toolchain only: `cargo-ndk`, two ABIs, `.so` loads, `slr_abi_version()` returns | Emulator |
 | **M5** | Oboe C++ shim + route-change state machine | **Phone** |
@@ -368,6 +368,24 @@ not a test, it is a rehearsal.
   exists.
 - 802.11 retry bursts at the AP cause depth ratchet; the slow-trim mechanism is
   the defence and needs field validation.
+- **Arrival jitter biases the buffer-depth measurement upwards.** The depth is
+  measured as the span to the newest packet present, so an early arrival raises
+  it although the audio in between has not arrived. Measured in the harness:
+  under 15 ms of jitter, with two *identical* clocks, the depth reads ~7 ms
+  above target and the drift controller holds ~460 ppm trying to drain it. The
+  pitch offset is 0.8 cents and inaudible, but the correction is left with no
+  headroom for real drift and the rate the receiver reports becomes a false
+  ~90 ppm. The fix is to steer on a windowed *minimum* depth — how close the
+  buffer came to starving — which needs the same percentile machinery as
+  adaptive depth, so it is deferred to that work rather than bolted on.
+- **Two findings corrected the reviewed design, both from the harness.** The
+  plan had the drift controller steering on the contiguous (gap-free) run,
+  reasoning that a buffer "will underrun on the hole no matter how full it
+  looks" — untrue of a reader that conceals and moves on, and it made a stream
+  with every third packet missing report a near-empty buffer. And resampling
+  alone cannot retire a large backlog: at the 500 ppm steady clamp, the 200 ms
+  an outage leaves takes seven minutes to drain, so a faded skip is now used
+  above 40 ms of excess.
 - **A rejected join tells the phone nothing.** The desktop closes the socket,
   which cannot distinguish "the session is full" from "that code expired" —
   and those want different words on screen. Delivering the reason needs a

@@ -97,6 +97,26 @@ impl PacketFlags {
         Self(0)
     }
 
+    /// The raw bitfield, as it appears in the header.
+    ///
+    /// A receiver needs this: it stores a packet's flags alongside its audio
+    /// and reads them back when the packet is played, which may be a hundred
+    /// milliseconds later and on a different thread.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// Rebuilds flags from a raw bitfield.
+    ///
+    /// Unknown bits are kept rather than rejected, because
+    /// `docs/protocol/audio-packets.md` requires them to be ignored — that is
+    /// what lets a minor protocol revision stay compatible.
+    #[must_use]
+    pub const fn from_bits(bits: u8) -> Self {
+        Self(bits)
+    }
+
     #[must_use]
     pub const fn with(self, flag: u8) -> Self {
         Self(self.0 | flag)

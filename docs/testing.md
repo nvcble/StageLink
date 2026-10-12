@@ -8,11 +8,11 @@ someone's ears.
 
 | Layer | Count | Needs hardware? |
 | --- | --- | --- |
-| Rust unit and integration | 387 | Mostly no — see below |
+| Rust unit and integration | 499 | Mostly no — see below |
 | `@stagelink/shared-protocol` | 43 | No |
 | Electron / desktop | 62 | No |
 | Cross-implementation protocol | 22 | No (spawns the Rust probe) |
-| **Total automated** | **514** | |
+| **Total automated** | **626** | |
 | Desktop smoke test | 44 checks | Launches the real app |
 | Physical audio verification | manual | **Yes** |
 | Multi-receiver streaming | manual | **Yes, and Phases 3 + 5** |
@@ -155,6 +155,46 @@ Two things to know when comparing the two reports:
 - A receiver cannot count losses before the first packet it ever sees. Start a
   run inside an outage and the transmitter will say it dropped 400 while the
   receiver honestly says it lost 201. That is not a receiver bug.
+
+## The receiver audio path, with no phone
+
+`receiver-harness` runs the real receiver — jitter buffer, concealment,
+resampler, drift controller, monitor chain — against the real reference
+transmitter on a **virtual clock**, with the sender and the DAC on independent
+crystal rates and a configurable network between them.
+
+```bash
+# Ten seconds, clean
+cargo run -p receiver-harness --bin stagelink-receiver-harness -- \
+  --output clean.wav
+
+# A 90-minute service with two ordinary crystals 40 ppm apart.
+# Runs in about half a second.
+cargo run -p receiver-harness --bin stagelink-receiver-harness -- \
+  --duration-secs 5400 --sender-ppm 20 --dac-ppm=-20 --assert-clean
+
+# The Wi-Fi case, and listen to the result
+cargo run -p receiver-harness --bin stagelink-receiver-harness -- \
+  --duration-secs 30 --loss 0.25 --burst-length 8 --jitter-ms 15 \
+  --output lossy.wav --assert-clean
+```
+
+The virtual clock is the point. Clock drift accumulates 216 ms over 90 minutes
+at 40 ppm, and the drift controller settles over minutes — none of which is
+testable at 1× speed. At roughly 250× it is something that runs on every
+commit.
+
+**Measured**, in the harness's own test suite: a 90-minute service with 40 ppm
+between the clocks holds its buffer at 40.0 ms with zero concealed gaps, where
+uncorrected it would drain by 216 ms; the resampler runs at the clocks' real
+difference to within a few ppm; 2% burst loss conceals to ~45 ms of soft
+dropout per burst rather than a click; a 1.5-second outage resyncs and comes
+back at the preset's latency rather than 1.5 seconds behind for the rest of the
+service.
+
+**What it cannot tell you:** how it sounds on a given phone, and what the real
+output latency is. Those need hardware — see
+[`latency-measurement.md`](latency-measurement.md).
 
 ## The desktop smoke test
 

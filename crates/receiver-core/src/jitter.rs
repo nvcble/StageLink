@@ -254,9 +254,12 @@ impl JitterBuffer {
 
     /// How many packets are ready in an unbroken run from `sequence`.
     ///
-    /// This is the buffer's **playable** depth, which is the only depth worth
-    /// adapting on: three packets with a hole in the middle will underrun on
-    /// the hole no matter how full the buffer looks.
+    /// This is **gap-free** audio, which is what deciding when to *start*
+    /// playing should use: beginning on a run full of holes means concealing
+    /// from the first moment.
+    ///
+    /// It is deliberately *not* the signal the drift controller steers on. See
+    /// [`JitterBuffer::span_from`].
     #[must_use]
     pub fn contiguous_from(&self, sequence: u32) -> usize {
         let mut depth = 0;
@@ -264,6 +267,32 @@ impl JitterBuffer {
             depth += 1;
         }
         depth
+    }
+
+    /// Packet slots from `sequence` up to and including the newest packet
+    /// present, holes included.
+    ///
+    /// **This is the depth that matters for latency and for starvation.** A
+    /// reader that conceals gaps rather than waiting for them consumes one
+    /// slot per packet interval whether the slot was full or not, so it runs
+    /// dry when there is nothing *beyond* the read position at all — not when
+    /// it meets a hole. And the distance to the newest packet is exactly how
+    /// far behind live the listener is, which is the quantity a latency
+    /// preset is a promise about.
+    ///
+    /// The reviewed plan specified the contiguous run for this, reasoning that
+    /// a buffer "will underrun on the hole no matter how full it looks". That
+    /// is true of a reader that stalls on a gap, and this one does not: it
+    /// conceals and moves on. Steering on the contiguous run instead makes a
+    /// stream with every third packet missing report a depth of two packets
+    /// however much audio is really buffered, and the controller then tries to
+    /// correct a deficit that does not exist.
+    #[must_use]
+    pub fn span_from(&self, sequence: u32) -> usize {
+        match self.highest_from(sequence) {
+            Some(highest) => (audio_protocol::sequence_delta(sequence, highest) + 1).max(0) as usize,
+            None => 0,
+        }
     }
 
     /// Highest sequence present within one wrap of `sequence`.
@@ -367,6 +396,32 @@ mod tests {
         assert_eq!(buffer.contiguous_from(10), 3);
         assert_eq!(buffer.contiguous_from(14), 2);
         assert_eq!(buffer.contiguous_from(13), 0);
+    }
+
+    /// The depth the drift controller steers on. Holes count, because the
+    /// reader conceals them rather than stalling, so each still takes a packet
+    /// interval to play.
+    #[test]
+    fn the_span_counts_holes_where_the_contiguous_run_does_not() {
+        let buffer = buffer();
+        for sequence in [10_u32, 11, 12, 14, 15] {
+            buffer.insert(sequence, 0, 0, &samples(0.1), 10);
+        }
+        assert_eq!(buffer.contiguous_from(10), 3, "gap-free audio");
+        assert_eq!(buffer.span_from(10), 6, "slots up to the newest packet");
+
+        // Nothing at all is a genuinely empty buffer, in both measures.
+        assert_eq!(buffer.span_from(100), 0);
+        assert_eq!(buffer.contiguous_from(100), 0);
+    }
+
+    #[test]
+    fn the_span_works_across_the_wrap() {
+        let buffer = buffer();
+        buffer.insert(u32::MAX - 1, 0, 0, &samples(0.1), u32::MAX - 1);
+        buffer.insert(2, 0, 0, &samples(0.1), u32::MAX - 1);
+        // MAX-1, MAX, 0, 1, 2 — five slots, not four billion.
+        assert_eq!(buffer.span_from(u32::MAX - 1), 5);
     }
 
     #[test]

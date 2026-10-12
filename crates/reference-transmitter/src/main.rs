@@ -52,9 +52,6 @@
 //! *framing*, not its cryptography; a receiver that authenticates will reject
 //! these packets, which is correct.
 
-mod impairment;
-mod source;
-mod transmit;
 
 use std::net::UdpSocket;
 use std::path::PathBuf;
@@ -63,9 +60,9 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use tracing::{info, warn};
 
-use crate::impairment::ImpairmentConfig;
-use crate::source::Source;
-use crate::transmit::{CollectingSink, Sink, TransmitConfig, Transmitter};
+use reference_transmitter::impairment::ImpairmentConfig;
+use reference_transmitter::source::Source;
+use reference_transmitter::transmit::{CollectingSink, Sink, TransmitConfig, Transmitter};
 
 #[derive(Parser, Debug)]
 #[command(
