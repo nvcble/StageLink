@@ -301,6 +301,34 @@ impl AudioEngine {
         self.inner.lock().ring_stats.clone()
     }
 
+    /// Pops exactly one packet of captured frames for the sender thread.
+    ///
+    /// Returns false when the ring does not hold a whole packet, which the
+    /// sender records as an underrun rather than sending a short one.
+    ///
+    /// The ring stays owned by the engine rather than being handed to the
+    /// sender, because the diagnostics page reads its occupancy for the
+    /// latency breakdown. The mutex is taken 200 times a second on the sender
+    /// thread and held for a memcpy; the *capture* thread holds the ring's
+    /// producer and never touches this lock, so the real-time path is
+    /// unaffected either way.
+    pub fn pop_frames(&self, out: &mut [f32]) -> bool {
+        let mut inner = self.inner.lock();
+        inner
+            .ring
+            .as_mut()
+            .is_some_and(|ring| ring.pop_exact(out))
+    }
+
+    /// Negotiated sample rate, if a device is open.
+    pub fn sample_rate(&self) -> Option<u32> {
+        self.inner
+            .lock()
+            .negotiated
+            .as_ref()
+            .map(|negotiated| negotiated.format.sample_rate)
+    }
+
     /// Capture-callback timing, for diagnostics.
     pub fn capture_stats(&self) -> Option<Arc<CaptureStats>> {
         self.inner.lock().stats.clone()

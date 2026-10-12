@@ -10,6 +10,7 @@ pub mod handler;
 pub mod serialize;
 pub mod settings;
 pub mod state;
+pub mod stream_task;
 pub mod telemetry_task;
 
 pub use handler::{CONTROL_PROTOCOL_VERSION, DISPATCHED_METHODS, SERVICE_VERSION};

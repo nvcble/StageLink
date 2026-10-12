@@ -86,17 +86,13 @@ impl PacketBuilder {
     /// discontinuity flag so receivers can resynchronise rather than treating
     /// the gap as drift.
     ///
-    /// # This has no production caller yet
-    ///
-    /// Nothing calls it outside tests, because the UDP sender that would drive
-    /// it does not exist. Until it is wired, a desktop capture glitch reaches
-    /// the receiver as continuous sequence numbers, continuous timestamps and
-    /// no flag — just packets arriving late. The receiver then underruns with
-    /// no loss indication, and an operator cannot tell a desktop stall from
-    /// network loss.
-    ///
-    /// **The sender must call this whenever `CaptureStats::xruns` increases.**
-    /// See `docs/mobile-plan.md` (defect D3).
+    /// Driven by the send loop from `FrameSource::take_glitches`, which reads
+    /// the increase in `CaptureStats::xruns`. Without it a desktop stall
+    /// reaches the receiver as continuous sequence numbers, continuous
+    /// timestamps and no flag — just packets arriving late — so the receiver
+    /// underruns with no loss indication and an operator cannot tell a stalled
+    /// desktop from a bad network. This was defect D3 in
+    /// `docs/mobile-plan.md`.
     pub fn note_discontinuity(&mut self) {
         self.pending_discontinuity = true;
     }
@@ -116,7 +112,31 @@ impl PacketBuilder {
             stats.underruns.fetch_add(1, Ordering::Relaxed);
             return None;
         }
+        self.encode(stats, encrypted)
+    }
 
+    /// Builds a packet from samples the caller already has.
+    ///
+    /// The sender thread reads the capture ring itself — it has to, because it
+    /// also needs to know whether the ring was short in order to count an
+    /// underrun and keep its cadence — so it needs a way in that does not
+    /// take the ring. Same encoding, same sequence counter, same flags.
+    pub fn build_from_samples(
+        &mut self,
+        samples: &[f32],
+        stats: &PacketiserStats,
+        encrypted: bool,
+    ) -> Option<&[u8]> {
+        if samples.len() != self.frames_per_packet {
+            // Refused rather than padded: a short packet is read by a receiver
+            // as a timing discontinuity on every packet.
+            return None;
+        }
+        self.samples.copy_from_slice(samples);
+        self.encode(stats, encrypted)
+    }
+
+    fn encode(&mut self, stats: &PacketiserStats, encrypted: bool) -> Option<&[u8]> {
         let silent = self.samples.iter().all(|&sample| sample == 0.0);
         let mut flags = PacketFlags::empty();
         if silent {

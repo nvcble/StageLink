@@ -493,6 +493,106 @@ impl StageLinkHandler {
         }))
     }
 
+    // -- streaming ---------------------------------------------------------
+
+    /// Starts sending audio.
+    ///
+    /// Everything that could make this a lie is checked first: a device must
+    /// actually be capturing, an adapter must actually be present, and the
+    /// transport must be one this build will carry. A dashboard that says
+    /// "streaming" while nobody can hear anything is worse than an error.
+    async fn stream_start(&self) -> Result<Value, ServiceErrorPayload> {
+        if self.state.sender.lock().is_some() {
+            // Idempotent rather than an error: two clicks on Start should not
+            // produce a failure dialog, and the stream is already what was
+            // asked for.
+            return Ok(self.stream_status());
+        }
+
+        let settings = self.state.settings_snapshot();
+        let adapters = self.enumerate_adapters().await?;
+        let selected = self.state.selected_adapter.lock().clone();
+        let bind_address = serialize::selected_address(&adapters, selected.as_deref(), &settings)
+            .ok_or_else(|| {
+                ServiceErrorPayload::new(
+                    "NETWORK_ADAPTER_UNAVAILABLE",
+                    "Choose a streaming network adapter before starting.",
+                )
+                .with_detail("Pick the adapter facing your access point on the Network page.")
+            })?;
+
+        // The device's negotiated rate, not the configured one: WASAPI may
+        // have given us 44.1 kHz whatever the setting says, and labelling the
+        // packets 48 kHz would make every receiver play the mix sharp.
+        let sample_rate = self.state.audio.sample_rate().ok_or_else(|| {
+            ServiceErrorPayload::new(
+                "STREAM_NO_INPUT",
+                "No audio is being captured, so there is nothing to stream.",
+            )
+            .with_detail("Select an input device on the Audio Input page first.")
+        })?;
+
+        let config = crate::stream_task::stream_config(&settings, &bind_address, sample_rate);
+        let session_id = crate::stream_task::new_session_id();
+        let sender = crate::stream_task::start(
+            &self.state.audio,
+            config,
+            session_id,
+            self.state.release_build,
+        )?;
+
+        let started_at = now_ms();
+        *self.state.sender.lock() = Some(crate::state::ActiveStream {
+            sender,
+            session_id,
+            started_at,
+        });
+
+        let status = self.stream_status();
+        self.push_event("stream.status", status.clone());
+        Ok(status)
+    }
+
+    /// Stops sending audio.
+    fn stream_stop(&self, params: Value) -> Result<Value, ServiceErrorPayload> {
+        let immediate = params
+            .get("immediate")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        if let Some(mut active) = self.state.sender.lock().take() {
+            // Draining sends an end-of-stream marker, so receivers stop
+            // cleanly instead of waiting out their jitter buffers on sudden
+            // silence.
+            crate::stream_task::stop(&mut active.sender, immediate);
+        }
+
+        let status = self.stream_status();
+        self.push_event("stream.status", status.clone());
+        Ok(status)
+    }
+
+    fn stream_status(&self) -> Value {
+        match self.state.sender.lock().as_ref() {
+            Some(active) => {
+                crate::stream_task::status(&active.sender, active.started_at, active.session_id)
+            }
+            None => serialize::stream_status_stopped(),
+        }
+    }
+
+    /// Sends an event if a client is attached. Dropped otherwise: a renderer
+    /// that is not listening asks for the state when it reconnects.
+    fn push_event(&self, event: &str, payload: Value) {
+        if let Some(sink) = self.sink() {
+            let _ = sink.send(desktop_ipc::codec::Envelope::event(
+                event,
+                payload,
+                now_ms(),
+            ));
+        }
+    }
+
     // -- receivers ---------------------------------------------------------
 
     fn receivers_list(&self) -> Result<Value, ServiceErrorPayload> {
@@ -657,11 +757,9 @@ impl ControlHandler for StageLinkHandler {
             }
 
             // streaming
-            "stream.start" | "stream.stop" => Err(Self::not_implemented(
-                method,
-                "Phase 3 (audio streaming)",
-            )),
-            "stream.getStatus" => Ok(serialize::stream_status_stopped()),
+            "stream.start" => self.stream_start().await,
+            "stream.stop" => self.stream_stop(params),
+            "stream.getStatus" => Ok(self.stream_status()),
 
             // diagnostics
             "diagnostics.getSnapshot" => self.diagnostics_snapshot(),
@@ -809,7 +907,15 @@ mod tests {
     #[tokio::test]
     async fn unimplemented_methods_report_not_implemented_with_a_phase() {
         let handler = handler();
-        for method in ["stream.start", "stream.stop", "receivers.revoke"] {
+        // `stream.start` and `stream.stop` used to be here; they are real now,
+        // which is why the list is shorter than it was.
+        for method in [
+            "receivers.rename",
+            "receivers.disconnect",
+            "receivers.revoke",
+            "receiver.heartbeat",
+            "receiver.telemetry",
+        ] {
             match handler.handle(method, json!({})).await {
                 Err(error) => {
                     assert_eq!(error.code, "NOT_IMPLEMENTED", "for {method}");

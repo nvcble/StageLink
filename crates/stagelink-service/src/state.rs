@@ -40,7 +40,9 @@ pub struct MintedJoinCode {
 /// Service-wide state.
 pub struct ServiceState {
     pub started_at: Instant,
-    pub audio: AudioEngine,
+    /// Behind an `Arc` so the sender thread can hold the engine it reads
+    /// captured frames from without the engine having to be cloneable.
+    pub audio: Arc<AudioEngine>,
     pub database: Mutex<Database>,
     /// Opened at startup so the protected directory exists before it is
     /// needed. Read when receiver pairing lands in Phase 5.
@@ -57,8 +59,17 @@ pub struct ServiceState {
     pub selected_adapter: Mutex<Option<String>>,
     /// Whether the renderer has asked for periodic diagnostics pushes.
     pub diagnostics_streaming: Mutex<DiagnosticsSubscription>,
+    /// The running audio sender, while a stream is live.
+    pub sender: Mutex<Option<ActiveStream>>,
     /// Whether this is a packaged release build. Gates the insecure transport.
     pub release_build: bool,
+}
+
+/// A live stream and what is needed to describe it.
+pub struct ActiveStream {
+    pub sender: stream_server::StreamSender,
+    pub session_id: u32,
+    pub started_at: i64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -81,7 +92,7 @@ impl ServiceState {
 
         Arc::new(Self {
             started_at: Instant::now(),
-            audio: AudioEngine::new(),
+            audio: Arc::new(AudioEngine::new()),
             database: Mutex::new(database),
             secrets,
             settings: Mutex::new(settings),
@@ -91,6 +102,7 @@ impl ServiceState {
             system: SystemProbe::new(),
             selected_adapter: Mutex::new(selected_adapter),
             diagnostics_streaming: Mutex::new(DiagnosticsSubscription::default()),
+            sender: Mutex::new(None),
             release_build,
         })
     }

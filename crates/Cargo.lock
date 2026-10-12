@@ -1045,6 +1045,7 @@ version = "0.1.0"
 dependencies = [
  "audio-core",
  "audio-protocol",
+ "parking_lot",
  "serde",
  "thiserror",
  "tokio",
