@@ -282,16 +282,17 @@ async function main() {
     }
 
     // -- choose the transport ----------------------------------------------
-    // The encrypted transport is the default and the only one a release build
-    // will carry. Until the key exchange lands it cannot actually be used, so
-    // this asks for plaintext — which a development build permits and a
-    // release build refuses outright. When encryption is implemented this
-    // block goes away and the default is used.
-    if (!process.argv.includes('--encrypted')) {
+    // The encrypted transport is the default, is what a release build
+    // requires, and is what this test uses. `--plaintext` exists to exercise
+    // the development transport the headless tools use when there is no key
+    // exchange — a release build refuses it outright.
+    if (process.argv.includes('--plaintext')) {
       await client.invoke('settings.update', {
         streaming: { transport: 'udp-plaintext' },
       })
       log('using the plaintext transport (development builds only)')
+    } else {
+      log('using the encrypted transport')
     }
 
     // -- mint a join code --------------------------------------------------

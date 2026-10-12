@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use audio_protocol::TransportKind;
+use audio_protocol::{AEAD_TAG_BYTES, HEADER_BYTES, SessionKey, TransportKind};
 use parking_lot::Mutex;
 use tracing::{debug, info, warn};
 
@@ -84,6 +84,8 @@ pub struct SenderStats {
     dropped_queue_full: AtomicU64,
     /// Capture glitches that were flagged onto a packet.
     discontinuities: AtomicU64,
+    /// Packets dropped because they could not be sealed. Always a bug.
+    seal_failures: AtomicU64,
     bytes_sent: AtomicU64,
 }
 
@@ -111,6 +113,12 @@ impl SenderStats {
     #[must_use]
     pub fn bytes_sent(&self) -> u64 {
         self.bytes_sent.load(Ordering::Relaxed)
+    }
+    /// Packets dropped because sealing failed. Should always be zero; a
+    /// non-zero value means audio is being lost to a crypto fault.
+    #[must_use]
+    pub fn seal_failures(&self) -> u64 {
+        self.seal_failures.load(Ordering::Relaxed)
     }
 }
 
@@ -163,11 +171,25 @@ impl StreamSender {
     /// Binding happens here, on the caller's thread, so a port already in use
     /// is reported as an error the operator can act on rather than appearing
     /// later as silence.
+    ///
+    /// `key` seals every payload. It is required whenever the transport is
+    /// encrypted and the caller is responsible for not passing `None` then —
+    /// which `StreamSender::start` enforces rather than trusting, because a
+    /// stream that silently sent the `ENCRYPTED` flag over plaintext audio
+    /// would be the worst possible failure: it would look encrypted and be
+    /// readable by anyone on the network.
     pub fn start(
         config: StreamConfig,
         session_id: u32,
         source: Box<dyn FrameSource>,
+        key: Option<SessionKey>,
     ) -> std::io::Result<Self> {
+        if config.transport.is_encrypted() && key.is_none() {
+            return Err(std::io::Error::other(
+                "the encrypted transport needs a session key; refusing to send audio that \
+                 claims to be encrypted and is not",
+            ));
+        }
         // Bind to the chosen adapter's address, not to all of them: the
         // operator picked which network carries the audio, and sending from an
         // interface they did not pick is how audio ends up on a venue's
@@ -204,6 +226,7 @@ impl StreamSender {
                         packetiser_stats,
                         stop,
                         drain,
+                        key,
                     });
                 })?
         };
@@ -357,6 +380,9 @@ struct SendLoop {
     packetiser_stats: Arc<PacketiserStats>,
     stop: Arc<AtomicBool>,
     drain: Arc<AtomicBool>,
+    /// Seals every payload. `None` only on the plaintext transport, which a
+    /// release build refuses outright.
+    key: Option<SessionKey>,
 }
 
 fn send_loop(mut state: SendLoop) {
@@ -410,8 +436,14 @@ fn send_loop(mut state: SendLoop) {
     }
 
     if state.drain.load(Ordering::Acquire) {
-        let marker = builder.end_of_stream(encrypted).to_vec();
-        enqueue(&state, marker);
+        let marker_sequence = builder.sequence();
+        let mut marker = builder.end_of_stream(encrypted).to_vec();
+        // Sealed like any other packet. An unauthenticated end-of-stream is a
+        // forgery vector: anyone on the venue network could silence every
+        // performer at once.
+        if seal(&state, &mut marker, marker_sequence, encrypted).is_some() {
+            enqueue(&state, marker);
+        }
         // Flush repeatedly: the queues may hold more than one packet, and a
         // receiver that never gets the marker waits out its whole buffer.
         for _ in 0..state.config.per_receiver_queue_packets + 1 {
@@ -463,12 +495,50 @@ fn build(
     state: &SendLoop,
     encrypted: bool,
 ) -> Option<Vec<u8>> {
-    // The packetiser pulls from a ring, so it is fed through one here. A ring
-    // per packet would allocate; this reuses the builder's own scratch via a
-    // direct build instead.
-    builder
+    let sequence = builder.sequence();
+    let mut datagram = builder
         .build_from_samples(samples, &state.packetiser_stats, encrypted)
-        .map(<[u8]>::to_vec)
+        .map(<[u8]>::to_vec)?;
+
+    seal(state, &mut datagram, sequence, encrypted)?;
+    Some(datagram)
+}
+
+/// Seals a datagram in place, if the transport is encrypted.
+///
+/// Returns `None` when sealing fails, which drops the packet. Dropping is the
+/// only safe answer: sending it unsealed would put plaintext audio on a venue
+/// network under a header that claims to be encrypted, and a receiver would
+/// reject it anyway.
+fn seal(
+    state: &SendLoop,
+    datagram: &mut Vec<u8>,
+    sequence: u32,
+    encrypted: bool,
+) -> Option<()> {
+    if !encrypted {
+        return Some(());
+    }
+    let key = state.key.as_ref()?;
+
+    // The packetiser already reserved the tag region, so the plaintext is
+    // everything between the header and it.
+    let plaintext_len = datagram.len().checked_sub(HEADER_BYTES + AEAD_TAG_BYTES)?;
+    match key.seal(datagram, plaintext_len, sequence) {
+        Ok(total) => {
+            datagram.truncate(total);
+            Some(())
+        }
+        Err(error) => {
+            // Once, not per packet: 200 of these a second would fill a log
+            // faster than anybody could read one.
+            state.stats.seal_failures.fetch_add(1, Ordering::Relaxed);
+            if state.stats.seal_failures.load(Ordering::Relaxed) == 1 {
+                warn!(%error, "could not seal an audio packet; dropping it");
+            }
+            None
+        }
+    }
 }
 
 fn enqueue(state: &SendLoop, datagram: Vec<u8>) {
@@ -611,7 +681,7 @@ mod tests {
 
     #[test]
     fn a_sender_with_no_receivers_sends_nothing_but_keeps_running() {
-        let mut sender = StreamSender::start(config(), 1, Box::new(Tone::new(240))).unwrap();
+        let mut sender = StreamSender::start(config(), 1, Box::new(Tone::new(240)), None).unwrap();
         std::thread::sleep(Duration::from_millis(100));
         let stats = sender.stats();
         assert_eq!(stats.packets_sent(), 0, "nowhere to send");
@@ -624,7 +694,7 @@ mod tests {
     #[test]
     fn real_packets_reach_a_real_socket() {
         let (listener_socket, address) = listener();
-        let mut sender = StreamSender::start(config(), 0x5EED, Box::new(Tone::new(240))).unwrap();
+        let mut sender = StreamSender::start(config(), 0x5EED, Box::new(Tone::new(240)), None).unwrap();
         sender.add_destination("r1", address);
 
         let datagrams = receive(&listener_socket, 20);
@@ -645,7 +715,7 @@ mod tests {
     #[test]
     fn the_cadence_is_the_configured_frame_duration() {
         let (listener_socket, address) = listener();
-        let mut sender = StreamSender::start(config(), 1, Box::new(Tone::new(240))).unwrap();
+        let mut sender = StreamSender::start(config(), 1, Box::new(Tone::new(240)), None).unwrap();
         sender.add_destination("r1", address);
 
         let started = Instant::now();
@@ -668,7 +738,7 @@ mod tests {
     fn two_receivers_both_get_the_same_audio() {
         let (first_socket, first) = listener();
         let (second_socket, second) = listener();
-        let mut sender = StreamSender::start(config(), 1, Box::new(Tone::new(240))).unwrap();
+        let mut sender = StreamSender::start(config(), 1, Box::new(Tone::new(240)), None).unwrap();
         sender.add_destination("r1", first);
         sender.add_destination("r2", second);
 
@@ -693,7 +763,7 @@ mod tests {
     #[test]
     fn a_receiver_can_join_and_leave_mid_stream() {
         let (socket, address) = listener();
-        let mut sender = StreamSender::start(config(), 1, Box::new(Tone::new(240))).unwrap();
+        let mut sender = StreamSender::start(config(), 1, Box::new(Tone::new(240)), None).unwrap();
 
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(sender.destination_count(), 0);
@@ -717,7 +787,7 @@ mod tests {
     #[test]
     fn adding_the_same_receiver_twice_does_not_double_its_audio() {
         let (socket, address) = listener();
-        let mut sender = StreamSender::start(config(), 1, Box::new(Tone::new(240))).unwrap();
+        let mut sender = StreamSender::start(config(), 1, Box::new(Tone::new(240)), None).unwrap();
         sender.add_destination("r1", address);
         sender.add_destination("r1", address);
 
@@ -742,7 +812,7 @@ mod tests {
         let (socket, address) = listener();
         let mut tone = Tone::new(240);
         tone.glitches = 0;
-        let mut sender = StreamSender::start(config(), 1, Box::new(tone)).unwrap();
+        let mut sender = StreamSender::start(config(), 1, Box::new(tone), None).unwrap();
         sender.add_destination("r1", address);
 
         // No glitches: nothing flagged.
@@ -776,7 +846,7 @@ mod tests {
 
         let (socket, address) = listener();
         let mut sender =
-            StreamSender::start(config(), 1, Box::new(Glitchy { packets: 0 })).unwrap();
+            StreamSender::start(config(), 1, Box::new(Glitchy { packets: 0 }), None).unwrap();
         sender.add_destination("r1", address);
 
         let datagrams = receive(&socket, 20);
@@ -801,7 +871,7 @@ mod tests {
         let (socket, address) = listener();
         let mut tone = Tone::new(240);
         tone.remaining = Some(5);
-        let mut sender = StreamSender::start(config(), 1, Box::new(tone)).unwrap();
+        let mut sender = StreamSender::start(config(), 1, Box::new(tone), None).unwrap();
         sender.add_destination("r1", address);
 
         std::thread::sleep(Duration::from_millis(100));
@@ -823,7 +893,7 @@ mod tests {
     #[test]
     fn stopping_with_a_drain_sends_an_end_of_stream_marker() {
         let (socket, address) = listener();
-        let mut sender = StreamSender::start(config(), 1, Box::new(Tone::new(240))).unwrap();
+        let mut sender = StreamSender::start(config(), 1, Box::new(Tone::new(240)), None).unwrap();
         sender.add_destination("r1", address);
         let _ = receive(&socket, 5);
         sender.stop(true);
@@ -840,7 +910,7 @@ mod tests {
     #[test]
     fn stopping_without_a_drain_sends_no_marker() {
         let (socket, address) = listener();
-        let mut sender = StreamSender::start(config(), 1, Box::new(Tone::new(240))).unwrap();
+        let mut sender = StreamSender::start(config(), 1, Box::new(Tone::new(240)), None).unwrap();
         sender.add_destination("r1", address);
         let _ = receive(&socket, 5);
         sender.stop(false);
@@ -857,7 +927,7 @@ mod tests {
     #[test]
     fn an_unreachable_receiver_does_not_stop_the_others() {
         let (socket, address) = listener();
-        let mut sender = StreamSender::start(config(), 1, Box::new(Tone::new(240))).unwrap();
+        let mut sender = StreamSender::start(config(), 1, Box::new(Tone::new(240)), None).unwrap();
         // Port 1 on the loopback refuses everything.
         sender.add_destination("dead", "127.0.0.1:1".parse().unwrap());
         sender.add_destination("alive", address);
@@ -878,7 +948,7 @@ mod tests {
             bind_address: "203.0.113.1".to_owned(), // not an address on this host
             ..config()
         };
-        let result = StreamSender::start(config, 1, Box::new(Tone::new(240)));
+        let result = StreamSender::start(config, 1, Box::new(Tone::new(240)), None);
         assert!(
             result.is_err(),
             "binding an address this machine does not have must fail loudly"
@@ -887,7 +957,7 @@ mod tests {
 
     #[test]
     fn the_estimated_bitrate_scales_with_receivers() {
-        let mut sender = StreamSender::start(config(), 1, Box::new(Tone::new(240))).unwrap();
+        let mut sender = StreamSender::start(config(), 1, Box::new(Tone::new(240)), None).unwrap();
         assert_eq!(sender.estimated_bitrate(), 0, "nobody to send to");
 
         sender.add_destination("r1", "127.0.0.1:9".parse().unwrap());

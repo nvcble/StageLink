@@ -85,26 +85,19 @@ impl ReceiverSession {
     /// discovered before the desktop has a roster entry for a receiver that
     /// could never have heard anything.
     pub async fn join(payload: &JoinPayload, config: SessionConfig) -> anyhow::Result<Self> {
-        // Built on the assumed geometry, then rebuilt if the desktop says
-        // otherwise. The alternative — wait for the welcome, then bind — gives
-        // up the ability to declare the port.
-        let frames = config.frames_per_packet();
-        let mut receiver_config = ReceiverConfig::new(config.assumed_sample_rate, frames);
-        receiver_config.preset = config.preset;
-        let (net, provisional_audio) = receiver_core::receiver::new(receiver_config);
-
+        // The socket is bound first so the handshake can declare the port it
+        // actually got, and so a port that cannot be opened is discovered
+        // before the desktop has a roster entry for a receiver that could
+        // never have heard anything. The receive thread starts later, once the
+        // session id is known and the key can be derived.
         let bind = if config.ephemeral_audio_port {
             "0.0.0.0:0".to_owned()
         } else {
             payload.audio_bind()
         };
-        let socket = AudioSocket::start(
-            &bind,
-            payload.desktop_audio_address().map(|address| address.ip()),
-            net,
-        )
-        .with_context(|| format!("could not bind the audio socket at {bind}"))?;
-        let audio_port = socket.local_address().port();
+        let bound = crate::audio::BoundSocket::bind(&bind)
+            .with_context(|| format!("could not bind the audio socket at {bind}"))?;
+        let audio_port = bound.local_address().port();
 
         let mut identity = config.identity.clone();
         identity.audio_port = Some(audio_port);
@@ -133,46 +126,44 @@ impl ReceiverSession {
             ),
         };
 
-        // The desktop's geometry differs from what was assumed, so the audio
-        // path has to be rebuilt around it: the resampler's table, the jitter
-        // buffer's slot size and the concealer's fade length all depend on the
-        // sample rate, and none can change in place.
-        let confirmed_frames = audio_core::frames_per_packet(sample_rate, frame_ms);
-        let mut audio = if confirmed_frames == frames && sample_rate == config.assumed_sample_rate
-        {
-            provisional_audio
+        // The audio path is built around the rate the *desktop* reported, not
+        // the assumed one: the resampler's coefficient table, the jitter
+        // buffer's slot size and the concealer's fade length all depend on it
+        // and none can change in place. Building it here rather than before
+        // the handshake is why the socket is bound in two steps.
+        let frames = audio_core::frames_per_packet(sample_rate, frame_ms);
+        let mut receiver_config = ReceiverConfig::new(sample_rate, frames);
+        receiver_config.preset = config.preset;
+        let (mut net, mut audio) = receiver_core::receiver::new(receiver_config);
+        audio.apply_settings(MonitorSettings::default());
+
+        // The key, derived from the token this receiver scanned and the
+        // session id the desktop is using. Nothing is transmitted: both ends
+        // derive it independently from what the QR code already established.
+        //
+        // Without a session id there is no key yet, and an encrypted packet
+        // is refused rather than played as noise — which is what a receiver
+        // that joined before the operator pressed Start will see until the
+        // `stream.params` event arrives and it rejoins.
+        if let Some(session_id) = session_id {
+            net.set_session_key(audio_protocol::SessionKey::derive(
+                &payload.token,
+                session_id,
+            ));
         } else {
-            warn!(
-                assumed = config.assumed_sample_rate,
-                actual = sample_rate,
-                "the desktop's audio geometry differs from the assumed one; rebuilding"
-            );
-            let mut rebuilt = ReceiverConfig::new(sample_rate, confirmed_frames);
-            rebuilt.preset = config.preset;
-            let (net, audio) = receiver_core::receiver::new(rebuilt);
-            // The socket's input half has to be replaced too, which means a
-            // new socket on the same port. Dropping the old one first, because
-            // two sockets cannot hold one port.
-            drop(socket);
-            let replacement = AudioSocket::start(
-                &format!("0.0.0.0:{audio_port}"),
+            info!("no stream yet, so no audio key; encrypted packets will be refused");
+        }
+
+        let socket = bound
+            .run(
                 payload.desktop_audio_address().map(|address| address.ip()),
                 net,
-            )?;
-            return Ok(Self {
-                control,
-                socket: replacement,
-                audio,
-                status,
-                confirmed_sample_rate: Some(sample_rate),
-                session_id,
-            });
-        };
-        audio.apply_settings(MonitorSettings::default());
+            )
+            .with_context(|| "could not start the audio receive thread")?;
 
         info!(
             sample_rate,
-            frames_per_packet = confirmed_frames,
+            frames_per_packet = frames,
             audio_port,
             session = ?session_id,
             "receiver session ready"

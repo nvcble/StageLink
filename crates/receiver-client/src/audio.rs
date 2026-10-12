@@ -57,20 +57,67 @@ pub struct AudioSocket {
     local_address: std::net::SocketAddr,
 }
 
+/// A bound socket that is not yet receiving.
+///
+/// The two steps are separate because of an ordering problem with no other
+/// answer: the handshake has to declare the port this receiver bound, so the
+/// socket must exist first — but the decryption key is derived from the
+/// session id, which only arrives *in* the handshake, so the `NetworkInput`
+/// that holds it has to be built afterwards. Binding without running lets
+/// both be true.
+pub struct BoundSocket {
+    socket: UdpSocket,
+    local_address: std::net::SocketAddr,
+}
+
+impl BoundSocket {
+    /// Binds without starting a thread.
+    pub fn bind(address: &str) -> std::io::Result<Self> {
+        let socket = UdpSocket::bind(address)?;
+        let local_address = socket.local_addr()?;
+        Ok(Self { socket, local_address })
+    }
+
+    /// The port this receiver is listening on, to declare in the handshake.
+    #[must_use]
+    pub const fn local_address(&self) -> std::net::SocketAddr {
+        self.local_address
+    }
+
+    /// Starts the receive thread.
+    pub fn run(
+        self,
+        expect_from: Option<std::net::IpAddr>,
+        input: NetworkInput,
+    ) -> std::io::Result<AudioSocket> {
+        AudioSocket::run(self.socket, self.local_address, expect_from, input)
+    }
+}
+
 impl AudioSocket {
-    /// Binds and starts receiving.
+    /// Binds and starts receiving, in one step.
     ///
+    /// For callers that know the session id up front — a plaintext stream, or
+    /// a test. Joining uses [`BoundSocket`] instead.
+    pub fn start(
+        bind: &str,
+        expect_from: Option<std::net::IpAddr>,
+        input: NetworkInput,
+    ) -> std::io::Result<Self> {
+        let bound = BoundSocket::bind(bind)?;
+        bound.run(expect_from, input)
+    }
+
     /// `expect_from` is the desktop's address. Datagrams from anywhere else
     /// are counted and dropped: on a venue network something else will
     /// eventually send to this port, and a receiver that fed stray traffic to
     /// its jitter buffer would be playing whatever arrived.
-    pub fn start(
-        bind: &str,
+    fn run(
+        socket: UdpSocket,
+        local_address: std::net::SocketAddr,
         expect_from: Option<std::net::IpAddr>,
         mut input: NetworkInput,
     ) -> std::io::Result<Self> {
-        let socket = UdpSocket::bind(bind)?;
-        let local_address = socket.local_addr()?;
         // A timeout rather than a blocking read, so a stream that stops dead
         // still lets the thread notice it has been asked to stop.
         socket.set_read_timeout(Some(std::time::Duration::from_millis(250)))?;

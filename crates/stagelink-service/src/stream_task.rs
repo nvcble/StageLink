@@ -90,6 +90,7 @@ pub fn start(
     config: StreamConfig,
     session_id: u32,
     release_build: bool,
+    token: Option<&str>,
 ) -> Result<StreamSender, ServiceErrorPayload> {
     if !engine.is_running() {
         return Err(ServiceErrorPayload::new(
@@ -113,7 +114,27 @@ pub fn start(
     let _ = source.take_glitches();
 
     let transport = config.transport;
-    let sender = StreamSender::start(config, session_id, Box::new(source)).map_err(|error| {
+
+    // The key is derived from the join token and the session id. A receiver
+    // that scanned the code derives the same one independently; nothing is
+    // transmitted. See `audio_protocol::crypto` for what that does and does
+    // not buy.
+    let key = if transport.is_encrypted() {
+        let Some(token) = token else {
+            return Err(ServiceErrorPayload::new(
+                "STREAM_TRANSPORT_REFUSED",
+                "Create a join code before starting an encrypted stream.",
+            )
+            .with_detail(
+                "The audio key is derived from the join code, so there has to be one. Press \n                 Create code on the Receivers page.",
+            ));
+        };
+        Some(audio_protocol::SessionKey::derive(token, session_id))
+    } else {
+        None
+    };
+
+    let sender = StreamSender::start(config, session_id, Box::new(source), key).map_err(|error| {
         ServiceErrorPayload::new(
             "STREAM_BIND_FAILED",
             format!("Could not open the audio socket: {error}"),
@@ -239,7 +260,7 @@ mod tests {
     fn starting_without_capture_is_refused_with_the_action_to_take() {
         let engine = Arc::new(AudioEngine::new());
         let config = stream_config(&settings(), "127.0.0.1", 48_000);
-        let error = match start(&engine, config, 1, false) {
+        let error = match start(&engine, config, 1, false, None) {
             Err(error) => error,
             Ok(_) => panic!("no device is open, so this must not start"),
         };
@@ -285,7 +306,7 @@ mod tests {
                 true
             }
         }
-        let mut sender = StreamSender::start(config, 7, Box::new(Silent)).unwrap();
+        let mut sender = StreamSender::start(config, 7, Box::new(Silent), None).unwrap();
         let snapshot = status(&sender, 1_700_000_000_000, 7);
 
         assert_eq!(snapshot["state"], "running");

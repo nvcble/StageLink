@@ -56,16 +56,19 @@ capability; possessing it grants nothing.
 
 ## Encryption (production transport)
 
-> **Status:** specified and cross-tested, **not yet implemented.** The nonce and
-> key derivation below are normative so a receiver can be built against them;
-> there is no ChaCha20-Poly1305 code in the repository yet. `aead_nonce()` /
-> `aeadNonce()` exist in both implementations and are pinned to each other, so
-> the one part that must be byte-identical is already falsifiable.
+> **Status: implemented.** `audio_protocol::crypto` is the single
+> implementation, used by the desktop sender and every receiver. Verified end
+> to end against a release build: real audio from a mixer, sealed, delivered to
+> two concurrent receivers, and written to a listenable WAV.
+>
+> Read the limitation below on revocation before relying on this: it is real,
+> it is not a cipher problem, and it is the reason this section says what the
+> scheme does *not* buy as well as what it does.
 
 ```
 ciphertext || tag = ChaCha20-Poly1305(
     key   = HKDF-SHA256(
-                ikm  = control-channel shared secret,
+                ikm  = the join token, as ASCII hex,
                 salt = sessionId as 4 bytes little-endian,
                 info = "stagelink audio v1",
                 len  = 32),
@@ -74,6 +77,56 @@ ciphertext || tag = ChaCha20-Poly1305(
     plaintext = PCM S16LE samples
 )
 ```
+
+### Where the key comes from
+
+**The join token.** It is 256 bits from the OS generator, it is shown only as
+a QR code on the operator's screen, and it is already what authorises a
+receiver — so the set of people who can decrypt the audio is exactly the set
+who were shown the code. Nothing is transmitted: both ends derive the key
+independently from what the QR already established.
+
+The session id is the HKDF salt, so two sessions under one token have
+different keys. That is what makes the nonce's uniqueness argument hold when a
+sequence number restarts at zero.
+
+This closes the two threats that matter on a venue network:
+
+- **Eavesdropping.** Nobody on the Wi-Fi can hear the mix without having been
+  shown the code.
+- **Forgery.** Nobody can inject audio, or forge an `END_OF_STREAM` marker and
+  silence every performer at once — which a plaintext stream lets anyone on
+  the network do.
+
+### What it does not buy
+
+Stated plainly, because these are real limitations and not theoretical ones.
+
+**Revocation does not re-key.** Every receiver admitted under one join code
+derives the same key, so a device the operator revokes with
+`receivers.revoke` is disconnected and removed from the roster but can still
+decrypt the stream it was already receiving. Rotating the join code does not
+help: the key was derived at join time from the code that was current then.
+
+Closing it needs a per-receiver key delivered over a control channel that is
+itself encrypted and authenticated — an ephemeral X25519 exchange
+authenticated by the join token, with the desktop's long-term key pinned via
+the `fp` fingerprint that discovery already advertises. That is its own piece
+of work and is tracked as an open item in [`pairing.md`](pairing.md).
+
+In the meantime the operational answer is the honest one: **revoking a device
+mid-service ejects it from the roster and stops the desktop sending to it, but
+does not stop it listening to packets it can still see on the network.** To cut
+it off completely, stop and restart the stream, which takes a new session id
+and therefore a new key.
+
+**No forward secrecy.** A token captured later decrypts a recording of that
+session. The token is already a bearer credential with a five-minute life, so
+this adds no exposure that joining did not already have.
+
+A shared group key is what SRTP does for this shape of problem — one identical
+stream to many listeners — so the structure is not unusual. The gap is the
+revocation story, and it is the gap rather than the cipher.
 
 `tag` is the 16-byte Poly1305 tag, appended after the ciphertext. The ciphertext
 is the same length as the plaintext (ChaCha20 is a stream cipher), so an

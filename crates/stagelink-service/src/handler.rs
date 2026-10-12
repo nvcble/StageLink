@@ -540,11 +540,22 @@ impl StageLinkHandler {
 
         let config = crate::stream_task::stream_config(&settings, &bind_address, sample_rate);
         let session_id = crate::stream_task::new_session_id();
+        // The audio key is derived from the join token, so an encrypted
+        // stream needs one to exist. Held only for the call: it is not stored
+        // anywhere, and the sender keeps the derived key rather than the
+        // credential it came from.
+        let token = self
+            .state
+            .join_code
+            .lock()
+            .as_ref()
+            .map(|minted| minted.code.token.clone());
         let sender = crate::stream_task::start(
             &self.state.audio,
             config,
             session_id,
             self.state.release_build,
+            token.as_deref(),
         )?;
 
         let started_at = now_ms();

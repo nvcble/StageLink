@@ -8,11 +8,12 @@ someone's ears.
 
 | Layer | Count | Needs hardware? |
 | --- | --- | --- |
-| Rust unit and integration | 606 | Mostly no — see below |
+| Rust unit and integration | 649 | Mostly no — see below |
 | `@stagelink/shared-protocol` | 43 | No |
 | Electron / desktop | 62 | No |
 | Cross-implementation protocol | 22 | No (spawns the Rust probe) |
-| **Total automated** | **733** | |
+| Flutter / mobile | 32 | No (18 drive the real native library) |
+| **Total automated** | **808** | |
 | Desktop smoke test | 44 checks | Launches the real app |
 | Physical audio verification | manual | **Yes** |
 | Multi-receiver streaming | manual | **Yes, and Phases 3 + 5** |
@@ -223,10 +224,10 @@ send counters with no failures.
 
 Two things to know:
 
-- **It asks for the plaintext transport**, which a development build permits
-  and a release build refuses. The encrypted transport is the default and the
-  only one a release build will carry, and the key exchange is not implemented
-  yet — so until it is, this test cannot run against a packaged installer.
+- **It uses the encrypted transport**, which is the default and the only one a
+  release build carries. Verified against a release build: real audio from a
+  mixer, sealed, delivered to two concurrent receivers, written to listenable
+  WAVs. `--plaintext` exercises the development transport instead.
 - **A line input with nothing plugged in captures digital silence.** The script
   runs `audio.test` on each device and prefers one with signal; when none has
   any, it says so and verifies delivery rather than failing on a missing cable.
@@ -283,11 +284,16 @@ Honest list, so nobody mistakes a green suite for a working monitor system:
 | Claim | Status |
 | --- | --- |
 | Real audio is captured and metered | **Verified** on real hardware |
-| Audio packets reach a receiver | **Not verified.** The packetiser and receive path are tested; the UDP sender is Phase 3 |
-| Multiple concurrent receivers | **Not verified.** Needs the UDP sender (Phase 3) and the control server (Phase 5) |
-| Receiver pairing and authorisation | **Not verified.** Phase 5 |
-| Encrypted audio transport | **Not verified.** Phase 5 |
+| Audio packets reach a receiver | **Verified.** `scripts/end-to-end.mjs`, real capture to a listenable WAV |
+| Multiple concurrent receivers | **Verified.** Three at once, each with its own WAV and no loss |
+| Receiver pairing and authorisation | **Verified.** Join by QR, roster, heartbeats, telemetry, revocation |
+| Encrypted audio transport | **Verified** against a release build, which refuses to stream without it |
+| Audio reaches a **phone** | **Not verified.** The app has never run on a device |
+| Android output latency | **Not verified.** Needs a phone; varies by an order of magnitude between devices |
+| Audio survives a locked screen | **Not verified.** The Wi-Fi lock and foreground service are written, not tested |
+| Recovery from a route change | **Not verified.** Earphones in or out, on real hardware |
 | End-to-end latency | **Not measurable in software.** See [`latency-measurement.md`](latency-measurement.md) |
+| Revoking a device stops it hearing | **No — by design, for now.** A revoked receiver keeps the session key; see [`protocol/audio-packets.md`](protocol/audio-packets.md) |
 
 ## Manual verification before a service
 

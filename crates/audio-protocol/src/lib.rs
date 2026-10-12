@@ -17,6 +17,7 @@
 //!   are useful for jitter measurement and for ordering, but they are *not*
 //!   wall-clock time and must not be compared across a service restart.
 
+pub mod crypto;
 pub mod packet;
 pub mod transport;
 
@@ -25,6 +26,7 @@ pub use packet::{
     PACKET_MAGIC, PacketError, PacketFlags, PayloadFormat, aead_nonce, datagram_bytes,
     encode_header, fits_in_mtu, parse_header, sequence_delta,
 };
+pub use crypto::{CryptoError, SessionKey};
 pub use transport::{SequenceTracker, SequenceVerdict, TransportKind};
 
 /// Audio protocol version written into every datagram.

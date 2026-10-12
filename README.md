@@ -53,14 +53,16 @@ Stated plainly, because a monitor system you cannot trust is worse than none:
   concurrent headless receivers join over the real control channel and record
   listenable WAVs. What is missing is the *phone*: there is no mobile app yet,
   and the receiver is a command-line tool.
-- **There is no mobile app.** The receiver's whole audio path and control
-  client are written and tested (`receiver-core`, `receiver-client`), but there
-  is no Flutter project, no Android build and no audio sink — so nothing a
-  performer can install.
-- **The encrypted transport is not implemented**, and it is the only one a
-  release build will carry. The sender sets the flag and reserves the AEAD tag
-  region, but nothing seals the payload, so end-to-end testing needs a
-  development build and a packaged installer will refuse to stream.
+- **The mobile app has never run on a phone.** It exists, it compiles, and a
+  release APK builds with the native receiver for both ABIs — but no audio has
+  come out of a device, the output latency is unmeasured, and the Wi-Fi lock,
+  route-change recovery and screen-locked behaviour are all unverified. See
+  [apps/mobile/README.md](apps/mobile/README.md).
+- **Revoking a receiver does not stop it listening.** Every receiver admitted
+  under one join code shares the audio key, so a revoked device is ejected
+  from the roster and no longer sent to, but can still decrypt packets it can
+  see on the network. Stopping and restarting the stream takes a new key and
+  cuts it off. See `docs/protocol/audio-packets.md`.
 - **Latency has never been measured.** The design target is 40–90 ms; nothing
   in this repository has measured it, and doing so needs a phone and a
   physical loopback.

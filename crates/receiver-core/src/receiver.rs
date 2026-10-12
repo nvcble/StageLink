@@ -123,8 +123,13 @@ pub enum Accepted {
     EndOfStream,
     /// Not a StageLink packet, or a malformed one. Counted and ignored.
     Rejected,
-    /// Encrypted, and this build has no key.
+    /// Encrypted, and this receiver has no key.
     Encrypted,
+    /// Failed authentication: altered, replayed, or sealed with another key.
+    ///
+    /// Distinct from `Rejected` because it means something different — a
+    /// malformed packet is noise on the port, and this is somebody trying.
+    Unauthentic,
 }
 
 /// Counters a receiver reports about itself.
@@ -141,6 +146,9 @@ pub struct Telemetry {
     pub duplicates: u64,
     pub reordered: u64,
     pub rejected: u64,
+    /// Packets that failed authentication. Non-zero means either a key
+    /// mismatch or somebody on the network injecting packets.
+    pub unauthentic: u64,
     /// Playable depth, in milliseconds.
     pub buffer_health_ms: f64,
     /// Times the buffer had nothing to play and concealment ran.
@@ -187,6 +195,7 @@ struct Shared {
     duplicates: AtomicU64,
     reordered: AtomicU64,
     rejected: AtomicU64,
+    unauthentic: AtomicU64,
 
     // Audio-side counters.
     concealed_runs: AtomicU64,
@@ -238,6 +247,7 @@ pub fn new(config: ReceiverConfig) -> (NetworkInput, AudioOutput) {
         duplicates: AtomicU64::new(0),
         reordered: AtomicU64::new(0),
         rejected: AtomicU64::new(0),
+        unauthentic: AtomicU64::new(0),
         concealed_runs: AtomicU64::new(0),
         concealed_samples: AtomicU64::new(0),
         resyncs: AtomicU64::new(0),
@@ -254,6 +264,8 @@ pub fn new(config: ReceiverConfig) -> (NetworkInput, AudioOutput) {
             shared: Arc::clone(&shared),
             tracker: SequenceTracker::new(),
             samples: vec![0.0; config.frames_per_packet],
+            ciphertext: vec![0; config.frames_per_packet * 2 + audio_protocol::AEAD_TAG_BYTES],
+            key: None,
             config,
         },
         AudioOutput::new(shared, config),
@@ -270,6 +282,13 @@ pub struct NetworkInput {
     tracker: SequenceTracker,
     /// Decoded samples. Allocated once.
     samples: Vec<f32>,
+    /// Scratch for opening a sealed payload in place. Allocated once: the
+    /// network thread is not real-time, but 200 allocations a second is still
+    /// 200 allocations a second.
+    ciphertext: Vec<u8>,
+    /// Opens sealed payloads. `None` means this receiver has no key, and
+    /// encrypted packets are refused rather than played as noise.
+    key: Option<audio_protocol::SessionKey>,
     config: ReceiverConfig,
 }
 
@@ -285,12 +304,40 @@ impl NetworkInput {
             return Accepted::Rejected;
         };
 
-        if header.flags.encrypted() {
-            // Honest refusal rather than playing the ciphertext as audio,
-            // which would be loud noise straight into somebody's ears.
-            self.shared.rejected.fetch_add(1, Ordering::Relaxed);
-            return Accepted::Encrypted;
-        }
+        // An encrypted payload is opened here, on the network thread, so the
+        // audio callback never does cryptography — and so a packet that fails
+        // authentication is discarded before it can reach the jitter buffer.
+        let payload = if header.flags.encrypted() {
+            let Some(key) = &self.key else {
+                // Honest refusal rather than playing ciphertext as audio,
+                // which would be loud noise straight into somebody's ears.
+                self.shared.rejected.fetch_add(1, Ordering::Relaxed);
+                return Accepted::Encrypted;
+            };
+            if payload.len() > self.ciphertext.len() {
+                self.shared.rejected.fetch_add(1, Ordering::Relaxed);
+                return Accepted::Rejected;
+            }
+
+            let scratch = &mut self.ciphertext[..payload.len()];
+            scratch.copy_from_slice(payload);
+            let header_bytes = &datagram[..audio_protocol::HEADER_BYTES];
+
+            match key.open(header_bytes, scratch, header.sequence) {
+                Ok(len) => &self.ciphertext[..len],
+                Err(_) => {
+                    // Altered, replayed under a different header, or sealed
+                    // with another key. Counted and dropped: there is nothing
+                    // safe to do with it, and on a venue network this is also
+                    // what a forged end-of-stream marker looks like.
+                    self.shared.unauthentic.fetch_add(1, Ordering::Relaxed);
+                    self.shared.rejected.fetch_add(1, Ordering::Relaxed);
+                    return Accepted::Unauthentic;
+                }
+            }
+        } else {
+            payload
+        };
 
         let verdict = self.tracker.observe(header.session_id, header.sequence);
         let new_stream = matches!(
@@ -357,6 +404,23 @@ impl NetworkInput {
         self.shared
             .reordered
             .store(self.tracker.reordered(), Ordering::Relaxed);
+    }
+
+    /// Installs the key that opens sealed payloads.
+    ///
+    /// Called once the session id is known, because the key is derived from
+    /// it: see `audio_protocol::SessionKey::derive`. Until it is set, an
+    /// encrypted packet is refused rather than played as noise — which is
+    /// what a receiver that joined before the stream started will see for its
+    /// first few packets.
+    pub fn set_session_key(&mut self, key: audio_protocol::SessionKey) {
+        self.key = Some(key);
+    }
+
+    /// Whether this receiver can open sealed audio.
+    #[must_use]
+    pub const fn has_key(&self) -> bool {
+        self.key.is_some()
     }
 
     /// A handle the control channel can keep, so it can report telemetry
@@ -742,6 +806,7 @@ fn telemetry(shared: &Shared, config: ReceiverConfig) -> Telemetry {
         duplicates: shared.duplicates.load(Ordering::Relaxed),
         reordered: shared.reordered.load(Ordering::Relaxed),
         rejected: shared.rejected.load(Ordering::Relaxed),
+        unauthentic: shared.unauthentic.load(Ordering::Relaxed),
         buffer_health_ms: frames as f64 * 1_000.0 / rate,
         concealed_runs: shared.concealed_runs.load(Ordering::Relaxed),
         concealed_ms: concealed as f64 * 1_000.0 / rate,
@@ -1198,8 +1263,20 @@ mod tests {
     fn the_two_halves_run_on_separate_threads() {
         let (mut net, mut audio) = new(config());
 
+        // Enough packets to start playing, filed before either thread exists.
+        //
+        // Without this the test is a race: the audio thread is not throttled
+        // by a real DAC, so it can finish its renders before the network
+        // thread has filed anything and then hear nothing. That is a timing
+        // artefact of the test, not a property of the code — and a test that
+        // fails when an unrelated change shifts the timing by a microsecond
+        // is worse than no test.
+        for sequence in 0..40_u32 {
+            net.accept(&packet(SESSION, sequence, 0.5, 0), 0);
+        }
+
         let network = std::thread::spawn(move || {
-            for sequence in 0..2_000_u32 {
+            for sequence in 40..2_000_u32 {
                 net.accept(&packet(SESSION, sequence, 0.5, 0), u64::from(sequence) * 5_000);
             }
             net.telemetry()
@@ -1264,5 +1341,143 @@ mod tests {
         );
         let expected = dropped.len() as f64 * 100.0 / 500.0;
         assert!((telemetry.loss_percent - expected).abs() < 0.01);
+    }
+}
+
+#[cfg(test)]
+mod crypto_tests {
+    use super::*;
+    use audio_protocol::{AudioPacketHeader, HEADER_BYTES, SessionKey, encode_header};
+
+    const RATE: u32 = 48_000;
+    const FRAMES: usize = 240;
+    const SESSION: u32 = 0x5EED;
+    const TOKEN: &str = "9f2c3d4e5a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f";
+
+    /// A sealed packet, built exactly as the sender builds one.
+    fn sealed(key: &SessionKey, sequence: u32, value: f32) -> Vec<u8> {
+        let payload_len = FRAMES * 2;
+        let mut datagram =
+            vec![0_u8; HEADER_BYTES + payload_len + audio_protocol::AEAD_TAG_BYTES];
+        let header = AudioPacketHeader::new(
+            SESSION,
+            sequence,
+            u64::from(sequence) * 5_000,
+            PacketFlags::empty().with(PacketFlags::ENCRYPTED),
+        );
+        encode_header(&header, &mut datagram).unwrap();
+        let samples = vec![value; FRAMES];
+        audio_core::convert::f32_to_pcm_s16le(&samples, &mut datagram[HEADER_BYTES..]);
+        let total = key.seal(&mut datagram, payload_len, sequence).unwrap();
+        datagram.truncate(total);
+        datagram
+    }
+
+    fn peak(samples: &[f32]) -> f32 {
+        samples.iter().fold(0.0_f32, |acc, &s| acc.max(s.abs()))
+    }
+
+    #[test]
+    fn an_encrypted_stream_plays_when_the_receiver_has_the_key() {
+        let (mut net, mut audio) =
+            new(ReceiverConfig::new(RATE, FRAMES));
+        net.set_session_key(SessionKey::derive(TOKEN, SESSION));
+
+        let key = SessionKey::derive(TOKEN, SESSION);
+        for sequence in 0..40 {
+            assert_eq!(
+                net.accept(&sealed(&key, sequence, 0.5), 0),
+                if sequence == 0 { Accepted::SessionStarted } else { Accepted::Stored }
+            );
+        }
+
+        let mut block = vec![0.0_f32; FRAMES];
+        let mut heard = 0.0_f32;
+        for _ in 0..30 {
+            audio.render(&mut block);
+            heard = heard.max(peak(&block));
+        }
+
+        assert!((heard - 0.5).abs() < 0.02, "encrypted audio did not decode: {heard}");
+        assert_eq!(audio.telemetry().unauthentic, 0);
+        assert_eq!(audio.telemetry().packets_lost, 0);
+    }
+
+    /// Without a key, ciphertext must never reach the DAC: it would be loud
+    /// noise straight into somebody's ears.
+    #[test]
+    fn without_a_key_encrypted_packets_are_refused_rather_than_played() {
+        let (mut net, mut audio) = new(ReceiverConfig::new(RATE, FRAMES));
+        assert!(!net.has_key());
+
+        let key = SessionKey::derive(TOKEN, SESSION);
+        for sequence in 0..20 {
+            assert_eq!(net.accept(&sealed(&key, sequence, 0.5), 0), Accepted::Encrypted);
+        }
+
+        let mut block = vec![0.0_f32; FRAMES];
+        for _ in 0..20 {
+            audio.render(&mut block);
+            assert!(block.iter().all(|&s| s == 0.0), "ciphertext reached the DAC");
+        }
+    }
+
+    /// The forgery the plaintext transport allows: anyone on the venue
+    /// network sends an end-of-stream marker and silences every performer.
+    #[test]
+    fn a_packet_sealed_with_the_wrong_key_is_counted_and_discarded() {
+        let (mut net, mut audio) = new(ReceiverConfig::new(RATE, FRAMES));
+        net.set_session_key(SessionKey::derive(TOKEN, SESSION));
+
+        let attacker = SessionKey::derive(&"0".repeat(64), SESSION);
+        for sequence in 0..10 {
+            assert_eq!(
+                net.accept(&sealed(&attacker, sequence, 1.0), 0),
+                Accepted::Unauthentic
+            );
+        }
+
+        let mut block = vec![0.0_f32; FRAMES];
+        for _ in 0..10 {
+            audio.render(&mut block);
+            assert!(block.iter().all(|&s| s == 0.0), "forged audio was played");
+        }
+        assert_eq!(audio.telemetry().unauthentic, 10);
+    }
+
+    #[test]
+    fn a_tampered_packet_is_rejected() {
+        let (mut net, _audio) = new(ReceiverConfig::new(RATE, FRAMES));
+        net.set_session_key(SessionKey::derive(TOKEN, SESSION));
+
+        let key = SessionKey::derive(TOKEN, SESSION);
+        let mut packet = sealed(&key, 0, 0.5);
+        packet[HEADER_BYTES + 20] ^= 0x01;
+        assert_eq!(net.accept(&packet, 0), Accepted::Unauthentic);
+    }
+
+    /// The header travels in the clear but is bound in as associated data, so
+    /// renumbering a packet to play it in the wrong place is detected.
+    #[test]
+    fn a_renumbered_packet_is_rejected_even_though_the_header_is_readable() {
+        let (mut net, _audio) = new(ReceiverConfig::new(RATE, FRAMES));
+        net.set_session_key(SessionKey::derive(TOKEN, SESSION));
+
+        let key = SessionKey::derive(TOKEN, SESSION);
+        let mut packet = sealed(&key, 5, 0.5);
+        // Rewrite the sequence number in the header.
+        packet[12..16].copy_from_slice(&9_u32.to_le_bytes());
+        assert_eq!(net.accept(&packet, 0), Accepted::Unauthentic);
+    }
+
+    #[test]
+    fn a_key_for_another_session_does_not_open_this_one() {
+        let (mut net, _audio) = new(ReceiverConfig::new(RATE, FRAMES));
+        // Derived for the wrong session, which is what a receiver that missed
+        // a session change would have.
+        net.set_session_key(SessionKey::derive(TOKEN, SESSION + 1));
+
+        let key = SessionKey::derive(TOKEN, SESSION);
+        assert_eq!(net.accept(&sealed(&key, 0, 0.5), 0), Accepted::Unauthentic);
     }
 }

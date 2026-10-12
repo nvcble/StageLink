@@ -297,12 +297,12 @@ Ordered so that everything hard is proven **before** any hardware is required.
 | **M0** | Spec fixes and shipped-defect fixes (D1–D6, contradictions), each with a failing test first. **Protocol work complete**; D3's fix waits on M6, and the UDP sender, control server and reference transmitter are M1/M6/M7 | — |
 | **M1** | `crates/reference-transmitter` — WAV/tone replay with injectable loss, bursts, reorder, duplicates, outages, `sessionId` change, `--clock-ppm`, `--seed`. **Done**, and verified against `test-receiver` over a real socket | — |
 | **M2** | `crates/receiver-core` as a pure library + `receiver-harness` with a simulated DAC clock. De-jitter, concealment, resampler, drift controller, EQ, limiter, telemetry. **~80% of the hard code. Done**, less adaptive depth, which is M4 | — |
-| **M3** | C ABI + cbindgen + ffigen, built as a **Windows DLL**, driven by Dart tests on desktop | — |
-| **M4** | Android toolchain only: `cargo-ndk`, two ABIs, `.so` loads, `slr_abi_version()` returns | Emulator |
-| **M5** | Oboe C++ shim + route-change state machine | **Phone** |
-| **M6** | Desktop UDP sender, validated against the M1 harness | — |
-| **M7** | Control channel: WebSocket server desktop-side, client + handshake + keys + pinning + heartbeat in Rust | — |
-| **M8** | Encryption on, plaintext refused, physical loopback latency measurement | Phone |
+| **M3** | C ABI, built as a **Windows DLL**, driven by Dart tests on desktop. **Done** — 18 Dart tests against the real library; bindings hand-written because libclang is absent | — |
+| **M4** | Android toolchain: two ABIs cross-compiled, a release APK carrying them. **Done**, less `.so` loading on a device | Emulator |
+| **M5** | Oboe C++ shim + route-change state machine. **Written, never run** | **Phone** |
+| **M6** | Desktop UDP sender. **Done** and validated end to end | — |
+| **M7** | Control channel: WebSocket server and client, handshake, heartbeat, telemetry. **Done**, less fingerprint pinning | — |
+| **M8** | Encryption on, plaintext refused. **Done** and verified against a release build. Physical loopback latency measurement still needs a phone | Phone |
 | **M9** | iOS | **Mac** |
 
 Proving the C ABI as a Windows DLL (M3) before any Android toolchain exists is
@@ -391,9 +391,12 @@ not a test, it is a rehearsal.
   and those want different words on screen. Delivering the reason needs a
   server→receiver message defined outside the renderer's event registry, which
   is a control-server design decision (M7), left open rather than guessed at.
-- **The audio protocol has no key exchange yet.** D5 pins the nonce and the
-  HKDF derivation, but the handshake that establishes the shared secret the
-  HKDF consumes is M7 work. `transport: "udp-encrypted"` is the default
-  setting and remains unimplementable until then — which is why plaintext is
-  what a dev build actually uses and why a release build refuses to stream at
-  all rather than quietly falling back.
+- **Revocation does not re-key the audio stream.** The session key is derived
+  from the join token, so every receiver admitted under one code shares it: a
+  revoked device is ejected from the roster and no longer sent to, but can
+  still decrypt packets it can see. The fix is a per-receiver key over a
+  control channel that is itself encrypted and authenticated — an ephemeral
+  X25519 exchange authenticated by the join token, with the desktop key
+  pinned via the `fp` fingerprint discovery already advertises. Its own
+  milestone; the operational answer meanwhile is to restart the stream, which
+  takes a new session id and therefore a new key.
