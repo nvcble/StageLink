@@ -16,9 +16,29 @@ use audio_core::{AudioRing, LevelAccumulator, RingConsumer, RingStats, ShareMode
 use parking_lot::Mutex;
 use tracing::{info, warn};
 
-/// Capture ring depth. Generous: a Windows scheduling stall should cost
-/// nothing, and 250 ms of mono `f32` at 48 kHz is only 48 kB.
-const RING_MILLIS: f64 = 250.0;
+/// Capture ring capacity.
+///
+/// Deliberately modest. Capacity here is not free headroom: audio waiting in
+/// the ring is audio nobody has heard yet, so anything the ring is actually
+/// *using* is latency every listener pays. 60 ms still absorbs a Windows
+/// scheduling stall of several capture periods, and is a bound on how far
+/// behind live a stall can ever put us.
+///
+/// This was 250 ms, which was sized as though a deep buffer were purely
+/// insurance. It was not: with the sender consuming at exactly real time and
+/// nothing discarding the excess, a full ring meant a permanent quarter-second
+/// delay. See [`AudioEngine::reset_ring`] and `RingConsumer::trim_to`.
+const RING_MILLIS: f64 = 60.0;
+
+/// Packets of backlog tolerated in the capture ring before the oldest audio is
+/// discarded.
+///
+/// Two is enough to ride out the jitter of a 10 ms capture period feeding a
+/// 5 ms packet cadence without ever trimming in normal operation; a third
+/// gives the sender thread one late wake-up of slack. Beyond that the audio is
+/// not late, it is *stale*, and skipping forward is the cheaper of the two
+/// evils.
+const MAX_BACKLOG_PACKETS: usize = 3;
 
 /// What the engine is currently doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,12 +332,47 @@ impl AudioEngine {
     /// thread and held for a memcpy; the *capture* thread holds the ring's
     /// producer and never touches this lock, so the real-time path is
     /// unaffected either way.
+    ///
+    /// Trims before reading, so the backlog is bounded on every packet rather
+    /// than only when a stream starts. The sender never bursts to catch up —
+    /// see `stream_server::sender`'s pacing notes — so without this, every
+    /// scheduling stall would add its own delay permanently, and a long enough
+    /// session on a loaded machine would drift back towards the old behaviour.
     pub fn pop_frames(&self, out: &mut [f32]) -> bool {
         let mut inner = self.inner.lock();
-        inner
-            .ring
-            .as_mut()
-            .is_some_and(|ring| ring.pop_exact(out))
+        let Some(ring) = inner.ring.as_mut() else {
+            return false;
+        };
+        // The bound is on the backlog *before* this read, so the ring is left
+        // holding at most MAX_BACKLOG_PACKETS - 1 once the packet comes out.
+        ring.trim_to(out.len() * MAX_BACKLOG_PACKETS);
+        ring.pop_exact(out)
+    }
+
+    /// Drops audio captured before now, so a starting stream begins at live.
+    ///
+    /// Called when a stream starts. A device is usually opened minutes before
+    /// anyone presses Start — the operator is setting levels — and nothing
+    /// reads the ring in the meantime, so by then it holds a full ring of audio
+    /// from whenever the device was opened. Starting the sender on that means
+    /// every performer hears the whole ring's worth of delay for the entire
+    /// session, with nothing downstream able to detect it: the packets are
+    /// perfectly paced and perfectly sequenced, just late.
+    pub fn reset_ring(&self) {
+        let mut inner = self.inner.lock();
+        if let Some(ring) = inner.ring.as_mut() {
+            let discarded = ring.occupied();
+            ring.clear();
+            if discarded > 0 {
+                let rate = inner
+                    .negotiated
+                    .map_or(48_000, |negotiated| negotiated.format.sample_rate);
+                info!(
+                    discarded_ms = (discarded as f64 * 1_000.0) / f64::from(rate.max(1)),
+                    "discarded buffered capture audio so the stream starts at live"
+                );
+            }
+        }
     }
 
     /// Negotiated sample rate, if a device is open.
@@ -381,6 +436,110 @@ mod tests {
         engine.close(0);
         engine.close(0);
         assert_eq!(engine.status().state, CaptureState::Idle);
+    }
+
+    #[test]
+    fn resetting_the_ring_with_no_device_open_is_harmless() {
+        // Stream start calls this unconditionally, and a stream can be asked
+        // for in states where no ring exists yet.
+        let engine = AudioEngine::new();
+        engine.reset_ring();
+        engine.reset_ring();
+        assert_eq!(engine.status().state, CaptureState::Idle);
+    }
+
+    #[test]
+    fn popping_from_an_engine_with_no_device_reports_no_audio() {
+        let engine = AudioEngine::new();
+        let mut packet = [0.0_f32; 240];
+        assert!(!engine.pop_frames(&mut packet));
+    }
+
+    /// The latency regression, and the reason any of this exists.
+    ///
+    /// A capture device is opened long before anyone starts a stream, and
+    /// nothing reads the ring until then, so it saturates. The bug this guards
+    /// against is a sender that then begins reading at the *oldest* sample and
+    /// stays a full ring behind live for the whole session — inaudible as a
+    /// glitch, obvious as a delay, and invisible to every controller
+    /// downstream because the packets are perfectly paced and sequenced.
+    ///
+    /// Hardware-dependent: skips cleanly where there is no capture endpoint.
+    #[cfg(windows)]
+    #[test]
+    fn a_stream_starting_on_a_saturated_ring_still_begins_near_live() {
+        let Ok(devices) = AudioEngine::list_devices(false) else {
+            eprintln!("skipping: enumeration unavailable");
+            return;
+        };
+        let Some(device) = devices
+            .iter()
+            .find(|d| d.state.is_usable() && d.input_channels > 0)
+        else {
+            eprintln!("skipping: no active capture endpoint on this machine");
+            return;
+        };
+
+        let engine = AudioEngine::new();
+        if engine.open(&device.id, 0, 48_000, ShareMode::Shared, 0).is_err() {
+            eprintln!("skipping: could not open {}", device.name);
+            return;
+        }
+
+        // Nobody is reading: this is the operator setting levels before the
+        // show. Well past RING_MILLIS, so the ring is full.
+        std::thread::sleep(core::time::Duration::from_millis(300));
+
+        let saturated = engine.ring_millis().expect("a device is open");
+        assert!(
+            saturated > RING_MILLIS / 2.0,
+            "the ring should have filled with nothing reading it, got {saturated:.1} ms — \
+             this test proves nothing if it did not"
+        );
+
+        // Pressing Start. The capture thread keeps pushing while we measure,
+        // so the assertion is that the backlog was *discarded* rather than
+        // that the ring is empty at some exact instant — a live producer makes
+        // any tight absolute bound here a race.
+        engine.reset_ring();
+        let after_reset = engine.ring_millis().expect("still open");
+        assert!(
+            after_reset < saturated / 2.0,
+            "a starting stream must not inherit the backlog: {after_reset:.1} ms \
+             of the {saturated:.1} ms survived the reset"
+        );
+
+        // And the bound holds against a ring that saturates again mid-session,
+        // which is what a scheduling stall on a loaded machine looks like.
+        std::thread::sleep(core::time::Duration::from_millis(300));
+        assert!(
+            engine.ring_millis().is_some_and(|millis| millis > RING_MILLIS / 2.0),
+            "precondition: the ring should be full again"
+        );
+
+        // 240 frames is one 5 ms packet at 48 kHz.
+        let mut packet = [0.0_f32; 240];
+        assert!(engine.pop_frames(&mut packet), "a full ring holds a whole packet");
+
+        // Again a live producer is refilling as we measure, so the bound is
+        // "nowhere near saturated" rather than an exact packet count. The real
+        // target is MAX_BACKLOG_PACKETS - 1 packets, about 10 ms.
+        let bounded = engine.ring_millis().expect("still open");
+        assert!(
+            bounded < RING_MILLIS / 2.0,
+            "reading must trim the backlog, not carry it: {bounded:.1} ms of a \
+             {RING_MILLIS:.0} ms ring"
+        );
+        assert!(bounded < saturated, "the backlog must shrink, not persist");
+
+        // The trim discarded audio, so the receiver has to be told.
+        let trims = engine
+            .ring_stats()
+            .expect("a device is open")
+            .trim_events();
+        assert!(trims > 0, "a trim that is not counted cannot be reported as a glitch");
+
+        engine.close(0);
     }
 
     #[test]

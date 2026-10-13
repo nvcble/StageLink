@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use audio_capture::CaptureStats;
+use audio_core::RingStats;
 use audio_protocol::TransportKind;
 use desktop_ipc::ServiceErrorPayload;
 use serde_json::{Value, json};
@@ -26,8 +27,12 @@ use crate::settings::AppSettings;
 struct CaptureSource {
     engine: Arc<AudioEngine>,
     stats: Option<Arc<CaptureStats>>,
+    /// Ring counters, for the trims that bound capture latency.
+    ring: Option<Arc<RingStats>>,
     /// Last xrun total seen, so only the increase is reported.
     seen_xruns: AtomicU64,
+    /// Last trim total seen, likewise.
+    seen_trims: AtomicU64,
 }
 
 impl FrameSource for CaptureSource {
@@ -35,11 +40,29 @@ impl FrameSource for CaptureSource {
         self.engine.pop_frames(out)
     }
 
+    /// Driver xruns and ring trims, because both break continuity.
+    ///
+    /// A trim belongs here as much as an xrun does. It discards captured audio
+    /// to claw latency back, so the samples either side of it were not
+    /// adjacent. Told about it, a receiver conceals the seam and
+    /// resynchronises; not told, it plays the splice as a click and reads the
+    /// jump as clock drift its controller then tries to correct.
     fn take_glitches(&mut self) -> u64 {
-        let Some(stats) = &self.stats else { return 0 };
-        let total = stats.xruns();
-        let seen = self.seen_xruns.swap(total, Ordering::Relaxed);
-        total.saturating_sub(seen)
+        let xruns = match &self.stats {
+            Some(stats) => {
+                let total = stats.xruns();
+                total.saturating_sub(self.seen_xruns.swap(total, Ordering::Relaxed))
+            }
+            None => 0,
+        };
+        let trims = match &self.ring {
+            Some(ring) => {
+                let total = ring.trim_events();
+                total.saturating_sub(self.seen_trims.swap(total, Ordering::Relaxed))
+            }
+            None => 0,
+        };
+        xruns + trims
     }
 }
 
@@ -106,7 +129,9 @@ pub fn start(
     let source = CaptureSource {
         engine: Arc::clone(engine),
         stats,
+        ring: engine.ring_stats(),
         seen_xruns: AtomicU64::new(0),
+        seen_trims: AtomicU64::new(0),
     };
     // Seed the xrun baseline so glitches from *before* this stream started are
     // not reported as a discontinuity in its first packet.
@@ -133,6 +158,13 @@ pub fn start(
     } else {
         None
     };
+
+    // Start at live. The ring has been filling since the device was opened —
+    // minutes ago, if the operator was setting levels — and the sender consumes
+    // at exactly real time, so whatever is in there now is delay every
+    // performer would carry for the whole session. Done as late as possible:
+    // everything that can refuse to start has already done so above.
+    engine.reset_ring();
 
     let sender = StreamSender::start(config, session_id, Box::new(source), key).map_err(|error| {
         ServiceErrorPayload::new(

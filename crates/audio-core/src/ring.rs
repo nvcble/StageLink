@@ -3,9 +3,25 @@
 //! This is the hand-off point between the WASAPI capture callback (producer)
 //! and the packetiser (consumer). The capacity is fixed at construction, so the
 //! producer never allocates and never blocks. When the consumer falls behind,
-//! the producer *drops* the oldest-arriving samples it cannot fit and increments
-//! an overrun counter — it must never wait, because waiting in the capture
-//! callback means a glitch in every performer's ears.
+//! the producer *drops* the samples it cannot fit and increments an overrun
+//! counter — it must never wait, because waiting in the capture callback means
+//! a glitch in every performer's ears.
+//!
+//! ## Depth is latency, so the reader bounds it
+//!
+//! Audio sitting in here is audio nobody has heard yet, which makes the depth a
+//! latency term and not merely a safety margin. The producer cannot bound it:
+//! when the ring is full, `push` can only discard the samples it was just
+//! handed — the *newest* audio — because a producer must never move the
+//! consumer's read position in an SPSC ring. Left at that, a ring that fills
+//! once stays wedged full of stale audio and every listener is permanently
+//! behind live, which is heard as a constant delay rather than as a dropout and
+//! so is far easier to miss than a glitch.
+//!
+//! [`RingConsumer::trim_to`] is the other half of that policy: the reader
+//! discards the oldest excess so the backlog stays bounded. In a live monitor
+//! the stale end is the worthless end. [`RingConsumer::clear`] drops the lot,
+//! which is what starting a stream wants.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -30,6 +46,15 @@ pub struct RingStats {
     written: AtomicU64,
     /// Total samples successfully read.
     read: AtomicU64,
+    /// Samples the consumer discarded to hold the backlog down.
+    ///
+    /// Not an error: this is latency being paid back. But it is audio nobody
+    /// heard, so it is a discontinuity a receiver must be told about, and a
+    /// figure that keeps climbing means this machine cannot keep up with the
+    /// send cadence.
+    trimmed_samples: AtomicU64,
+    /// Times a trim ran, as distinct from how much it discarded.
+    trim_events: AtomicU64,
 }
 
 impl RingStats {
@@ -53,6 +78,14 @@ impl RingStats {
     pub fn read(&self) -> u64 {
         self.read.load(Ordering::Relaxed)
     }
+    #[must_use]
+    pub fn trimmed_samples(&self) -> u64 {
+        self.trimmed_samples.load(Ordering::Relaxed)
+    }
+    #[must_use]
+    pub fn trim_events(&self) -> u64 {
+        self.trim_events.load(Ordering::Relaxed)
+    }
 
     pub fn reset(&self) {
         self.overrun_samples.store(0, Ordering::Relaxed);
@@ -60,6 +93,8 @@ impl RingStats {
         self.underrun_events.store(0, Ordering::Relaxed);
         self.written.store(0, Ordering::Relaxed);
         self.read.store(0, Ordering::Relaxed);
+        self.trimmed_samples.store(0, Ordering::Relaxed);
+        self.trim_events.store(0, Ordering::Relaxed);
     }
 }
 
@@ -110,6 +145,11 @@ impl RingProducer {
     /// Real-time safe: no allocation, no locking, no blocking. Anything that
     /// does not fit is dropped and counted as an overrun — dropping audio is
     /// bad, but stalling the driver callback is worse.
+    ///
+    /// Note *which* audio this drops: the tail of what it was just handed, the
+    /// newest and most useful samples, because it cannot touch the consumer's
+    /// read position. Bounding the backlog is [`RingConsumer::trim_to`]'s job,
+    /// not this one's.
     pub fn push(&mut self, samples: &[f32]) -> usize {
         let written = self.inner.push_slice(samples);
         self.stats.written.fetch_add(written as u64, Ordering::Relaxed);
@@ -179,10 +219,44 @@ impl RingConsumer {
         (self.occupied() as f64 * 1000.0) / f64::from(sample_rate)
     }
 
-    /// Discards everything buffered. Used when restarting a stream so stale
-    /// audio is not sent out ahead of the live signal.
+    /// Discards everything buffered. Used when starting or restarting a stream
+    /// so stale audio is not sent out ahead of the live signal.
+    ///
+    /// A capture device is typically opened minutes before anyone presses
+    /// Start — the operator is checking levels — and the ring fills up in that
+    /// time with nothing reading it. Without this, the first thing a stream
+    /// sends is the audio from when the device was opened, and it never catches
+    /// up.
     pub fn clear(&mut self) {
         self.inner.clear();
+    }
+
+    /// Discards the oldest samples until at most `max_samples` remain.
+    ///
+    /// Returns the number dropped. This is what keeps the ring's contribution
+    /// to latency bounded: the sender consumes exactly one packet per packet
+    /// interval and deliberately never bursts to catch up, so any backlog it
+    /// acquires — from a scheduling stall, a loaded machine, a device opened
+    /// long before the stream started — is permanent until something discards
+    /// it. Skipping forward costs one discontinuity; carrying the backlog costs
+    /// every listener that much delay for the rest of the session.
+    ///
+    /// Cheap and copy-free: it advances the read position rather than moving
+    /// samples. The caller should report the return value as a glitch, because
+    /// the audio either side of a trim is not continuous.
+    pub fn trim_to(&mut self, max_samples: usize) -> usize {
+        let occupied = self.inner.occupied_len();
+        if occupied <= max_samples {
+            return 0;
+        }
+        let skipped = self.inner.skip(occupied - max_samples);
+        if skipped > 0 {
+            self.stats
+                .trimmed_samples
+                .fetch_add(skipped as u64, Ordering::Relaxed);
+            self.stats.trim_events.fetch_add(1, Ordering::Relaxed);
+        }
+        skipped
     }
 
     #[must_use]
@@ -274,6 +348,67 @@ mod tests {
         producer.push(&[1.0; 8]);
         consumer.clear();
         assert_eq!(consumer.occupied(), 0);
+    }
+
+    #[test]
+    fn trimming_drops_the_oldest_samples_and_keeps_the_newest() {
+        let (mut producer, mut consumer) = AudioRing::with_capacity(16).unwrap();
+        producer.push(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+
+        assert_eq!(consumer.trim_to(2), 4, "four samples over the bound");
+        assert_eq!(consumer.occupied(), 2);
+
+        // The *live* end survives. Keeping 1.0 and 2.0 instead would be the
+        // bug this exists to prevent.
+        let mut out = [0.0_f32; 2];
+        assert_eq!(consumer.pop(&mut out), 2);
+        assert_eq!(out, [5.0, 6.0]);
+    }
+
+    #[test]
+    fn trimming_is_counted_so_the_latency_payback_is_visible() {
+        let (mut producer, mut consumer) = AudioRing::with_capacity(16).unwrap();
+        producer.push(&[0.5; 10]);
+        consumer.trim_to(4);
+
+        let stats = consumer.stats();
+        assert_eq!(stats.trimmed_samples(), 6);
+        assert_eq!(stats.trim_events(), 1);
+        // Trimmed audio was never read by the packetiser, so it must not be
+        // counted as read — the two numbers mean different things.
+        assert_eq!(stats.read(), 0);
+    }
+
+    #[test]
+    fn trimming_a_ring_already_within_the_bound_does_nothing() {
+        let (mut producer, mut consumer) = AudioRing::with_capacity(16).unwrap();
+        producer.push(&[1.0, 2.0, 3.0]);
+
+        assert_eq!(consumer.trim_to(8), 0);
+        assert_eq!(consumer.trim_to(3), 0, "exactly at the bound is not over it");
+        assert_eq!(consumer.occupied(), 3);
+        assert_eq!(consumer.stats().trim_events(), 0, "a no-op is not an event");
+    }
+
+    /// The regression this whole mechanism exists for: a ring that filled up
+    /// before anyone read it must not leave the reader permanently behind.
+    #[test]
+    fn a_saturated_ring_does_not_strand_the_reader_behind_stale_audio() {
+        // 100 ms at 48 kHz, filled with nobody reading — a device opened well
+        // before the stream started.
+        let (mut producer, mut consumer) = AudioRing::with_duration(48_000, 100.0).unwrap();
+        producer.push(&[0.25; 4_800]);
+        assert_eq!(producer.vacant(), 0, "the ring must be full for this to prove anything");
+        assert!((consumer.occupied_millis(48_000) - 100.0).abs() < 0.01);
+
+        // One packet of tolerated backlog at 5 ms.
+        let packet = 240;
+        consumer.trim_to(packet * 2);
+
+        assert!(
+            consumer.occupied_millis(48_000) <= 10.0,
+            "the reader must start near live, not 100 ms behind it"
+        );
     }
 
     #[test]
