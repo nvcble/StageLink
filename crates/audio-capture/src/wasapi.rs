@@ -11,8 +11,8 @@ use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, S_OK};
 use windows::Win32::Media::Audio::{
     AUDCLNT_SHAREMODE, AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_SHAREMODE_SHARED, DEVICE_STATE,
     DEVICE_STATE_ACTIVE, DEVICE_STATE_DISABLED, DEVICE_STATE_NOTPRESENT, DEVICE_STATE_UNPLUGGED,
-    DEVICE_STATEMASK_ALL, IAudioClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
-    WAVEFORMATEX, WAVEFORMATEXTENSIBLE, eCapture, eConsole,
+    DEVICE_STATEMASK_ALL, IAudioClient, IAudioClient3, IMMDevice, IMMDeviceEnumerator,
+    MMDeviceEnumerator, WAVEFORMATEX, WAVEFORMATEXTENSIBLE, eCapture, eConsole,
 };
 use windows::Win32::Media::Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
 use windows::Win32::Media::KernelStreaming::KSDATAFORMAT_SUBTYPE_PCM;
@@ -20,7 +20,7 @@ use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
     CoUninitialize, STGM_READ,
 };
-use windows::core::PCWSTR;
+use windows::core::{Interface, PCWSTR};
 
 use crate::device::{AudioApi, DeviceInfo, DeviceState, PROBE_SAMPLE_RATES};
 use crate::error::{CaptureError, Result};
@@ -229,6 +229,127 @@ pub fn mix_format(client: &IAudioClient) -> Result<AudioFormat> {
         CoTaskMemFree(Some(raw.cast()));
         result
     }
+}
+
+/// Converts a frame count to WASAPI's 100-nanosecond reference time.
+///
+/// Rounds **up**: a buffer a hair short of a whole number of periods is
+/// precisely what `AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED` complains about, and
+/// rounding down would ask again for a size the driver has already refused.
+#[must_use]
+pub fn frames_to_reference_time(frames: u32, sample_rate: u32) -> i64 {
+    if sample_rate == 0 {
+        return 0;
+    }
+    let hundred_nanos = (u64::from(frames) * 10_000_000).div_ceil(u64::from(sample_rate));
+    i64::try_from(hundred_nanos).unwrap_or(i64::MAX)
+}
+
+/// The shared-mode engine periods a driver reports, in frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnginePeriods {
+    pub default_frames: u32,
+    /// Every legal period is a whole multiple of this.
+    pub fundamental_frames: u32,
+    pub min_frames: u32,
+    pub max_frames: u32,
+}
+
+impl EnginePeriods {
+    /// The smallest period this driver will actually accept.
+    ///
+    /// The reported minimum is not necessarily legal by itself: every period
+    /// has to be a multiple of the fundamental, so the answer is the minimum
+    /// rounded up to it. A driver reporting a fundamental of zero is telling
+    /// us nothing we can use, and is treated as having no answer rather than
+    /// being divided by.
+    #[must_use]
+    pub fn smallest_legal(&self) -> Option<u32> {
+        if self.fundamental_frames == 0 || self.min_frames == 0 {
+            return None;
+        }
+        let period = self.min_frames.div_ceil(self.fundamental_frames) * self.fundamental_frames;
+        (period <= self.max_frames).then_some(period)
+    }
+}
+
+/// Asks the driver which shared-mode engine periods it supports.
+///
+/// `None` where `IAudioClient3` is unavailable or the driver declines to
+/// answer. Deliberately not an error: the caller falls back to the default
+/// period and the stream still works, just with more latency.
+#[must_use]
+pub fn shared_mode_periods(client: &IAudioClient, format: &AudioFormat) -> Option<EnginePeriods> {
+    let client3 = client.cast::<IAudioClient3>().ok()?;
+    let wave = build_format(format);
+    let mut periods = EnginePeriods {
+        default_frames: 0,
+        fundamental_frames: 0,
+        min_frames: 0,
+        max_frames: 0,
+    };
+    // SAFETY: `wave` outlives the call and every out-pointer is valid for it.
+    unsafe {
+        client3.GetSharedModeEnginePeriod(
+            core::ptr::from_ref(&wave).cast::<WAVEFORMATEX>(),
+            &mut periods.default_frames,
+            &mut periods.fundamental_frames,
+            &mut periods.min_frames,
+            &mut periods.max_frames,
+        )
+    }
+    .ok()?;
+    Some(periods)
+}
+
+/// Initialises a capture stream on the `IAudioClient3` low-latency shared path.
+///
+/// Shared mode only, and it cannot resample — `AUTOCONVERTPCM` is not
+/// supported here. That is worth knowing at the call site: running the
+/// interface natively at the stream's rate is what *unlocks* the small period,
+/// not merely what avoids a resampler.
+pub fn initialise_shared_low_latency(
+    client: &IAudioClient,
+    format: &AudioFormat,
+    stream_flags: u32,
+    period_frames: u32,
+) -> Result<()> {
+    let client3 = client.cast::<IAudioClient3>()?;
+    let wave = build_format(format);
+    // SAFETY: `wave` outlives the call; `None` for the session GUID means the
+    // process's default audio session.
+    unsafe {
+        client3.InitializeSharedAudioStream(
+            stream_flags,
+            period_frames,
+            core::ptr::from_ref(&wave).cast::<WAVEFORMATEX>(),
+            None,
+        )
+    }
+    .map_err(Into::into)
+}
+
+/// The engine period currently in force, in frames.
+///
+/// This is what the audio engine is *actually* running at, which is the honest
+/// figure for a latency breakdown — unlike the driver's default period, which
+/// does not move when something has put the engine on a different one.
+/// Meaningful in shared mode only: it describes the engine, and an exclusive
+/// stream does not use the engine.
+#[must_use]
+pub fn current_engine_period(client: &IAudioClient) -> Option<u32> {
+    let client3 = client.cast::<IAudioClient3>().ok()?;
+    let mut format: *mut WAVEFORMATEX = core::ptr::null_mut();
+    let mut period = 0_u32;
+    // SAFETY: both out-pointers are valid; the returned format is
+    // COM-allocated and freed immediately below.
+    let queried =
+        unsafe { client3.GetCurrentSharedModeEnginePeriod(&mut format, &mut period) }.is_ok();
+    if !format.is_null() {
+        // SAFETY: WASAPI allocated this with CoTaskMemAlloc.
+        unsafe { CoTaskMemFree(Some(format.cast())) };
+    }
+    (queried && period > 0).then_some(period)
 }
 
 /// Reads the driver's default and minimum periods, converted to frames.
@@ -487,6 +608,56 @@ mod tests {
                 unsafe { read_format(core::ptr::from_ref(&wave).cast::<WAVEFORMATEX>()) }.unwrap();
             assert_eq!(parsed, format);
         }
+    }
+
+    fn periods(default: u32, fundamental: u32, min: u32, max: u32) -> EnginePeriods {
+        EnginePeriods {
+            default_frames: default,
+            fundamental_frames: fundamental,
+            min_frames: min,
+            max_frames: max,
+        }
+    }
+
+    #[test]
+    fn the_smallest_legal_period_is_the_minimum_rounded_up_to_the_fundamental() {
+        // A driver whose minimum is already a multiple takes it unchanged.
+        assert_eq!(periods(480, 128, 128, 1_024).smallest_legal(), Some(128));
+        // One whose minimum is not a multiple must be rounded *up*: rounding
+        // down would ask for a period below the stated minimum.
+        assert_eq!(periods(480, 128, 130, 1_024).smallest_legal(), Some(256));
+        assert_eq!(periods(480, 100, 480, 1_024).smallest_legal(), Some(500));
+    }
+
+    #[test]
+    fn a_period_that_cannot_be_satisfied_is_declined_rather_than_guessed() {
+        // Rounding up past the maximum means there is no legal period here:
+        // 1000 rounds to 1024, which this driver will not accept.
+        assert_eq!(periods(480, 128, 1_000, 1_000).smallest_legal(), None);
+        // But where the rounded-up value still fits, it is legal and taken.
+        assert_eq!(periods(480, 128, 1_000, 1_024).smallest_legal(), Some(1_024));
+        // A zero fundamental would be a division by zero, and a zero minimum
+        // is not an answer. Both mean "this driver told us nothing usable".
+        assert_eq!(periods(480, 0, 128, 1_024).smallest_legal(), None);
+        assert_eq!(periods(480, 128, 0, 1_024).smallest_legal(), None);
+    }
+
+    #[test]
+    fn frames_convert_to_reference_time_rounding_up() {
+        // 480 frames at 48 kHz is 10 ms, and a reference time unit is 100 ns.
+        assert_eq!(frames_to_reference_time(480, 48_000), 100_000);
+        assert_eq!(frames_to_reference_time(240, 48_000), 50_000);
+
+        // 441 frames at 44.1 kHz is exactly 10 ms too.
+        assert_eq!(frames_to_reference_time(441, 44_100), 100_000);
+
+        // A frame count that does not divide evenly must round *up*: a buffer
+        // a hair short of a whole period is what the driver refused in the
+        // first place.
+        assert_eq!(frames_to_reference_time(1, 44_100), 227, "226.75 rounds up");
+
+        // A zero rate must not divide by zero.
+        assert_eq!(frames_to_reference_time(480, 0), 0);
     }
 
     #[test]

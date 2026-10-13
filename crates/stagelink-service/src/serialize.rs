@@ -89,6 +89,9 @@ pub fn audio_status(status: &AudioStatus) -> Value {
             // Surfaced because engine resampling costs a little latency and a
             // little quality, and the operator should know it is happening.
             "engineConverted": negotiated.engine_converted,
+            // And because resampling is now also what *costs* the small
+            // capture period: the low-latency path cannot convert.
+            "lowLatency": negotiated.low_latency,
         })),
         "framesCaptured": status.frames_captured,
         "xruns": status.xruns,

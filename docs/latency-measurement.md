@@ -20,7 +20,7 @@ figure, because the desktop genuinely cannot know one.
 
 | Term | How |
 | --- | --- |
-| Capture period | The driver reports it (`IAudioClient::GetDevicePeriod`) |
+| Capture period | The period actually granted — `IAudioClient3::GetCurrentSharedModeEnginePeriod` where available, `GetDevicePeriod` otherwise |
 | Packet frame duration | A configured value; arithmetic, not measurement |
 | Send queue time | Timed on this machine |
 
@@ -124,8 +124,8 @@ The settings worth touching, in order of effect:
 | --- | --- | --- |
 | Packet frame duration (5 ms default) | Lower adds less delay per packet | 2.5 ms doubles the packet rate and is less tolerant of loss |
 | Receiver jitter buffer | Dominant term on a congested network | Too small means dropouts, which are worse than latency |
-| Interface sample rate | Running the interface natively at 48 kHz avoids engine resampling | — |
-| WASAPI exclusive mode | Lower capture period | Locks the device; nothing else can use it |
+| Interface sample rate | Running the interface natively at the stream rate avoids engine resampling — and *unlocks* the low-latency capture path, which cannot resample | — |
+| WASAPI exclusive mode | Rarely needed now: the low-latency shared path gets a comparable period without locking the device | Locks the device; nothing else can use it. Not exposed in the UI |
 | Access point isolation | Removes contention — often the biggest single win | Needs a dedicated AP |
 
 The dashboard warns when Windows is resampling the input, because that is a

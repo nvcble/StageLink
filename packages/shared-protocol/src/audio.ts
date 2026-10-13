@@ -63,9 +63,23 @@ export const captureFormatSchema = z.object({
   deviceChannels: z.number().int().positive(),
   /** Sample format the device delivers before conversion to f32. */
   deviceSampleFormat: sampleFormatSchema,
-  /** Capture buffer period in frames, as granted by the driver. */
+  /** Capture period in frames, as actually granted by the driver. */
   periodFrames: z.number().int().positive(),
   shareMode: wasapiShareModeSchema,
+  /**
+   * Whether the Windows audio engine is resampling the input for us.
+   *
+   * Declared rather than merely sent: `audio.status` events are validated
+   * against this schema and the parsed result is what reaches the renderer, so
+   * an undeclared field is silently stripped on the way through. This one was,
+   * which meant the resampling warning never fired on a pushed status event.
+   */
+  engineConverted: z.boolean(),
+  /**
+   * Whether the `IAudioClient3` low-latency shared path was granted, giving a
+   * period below the driver's default without locking the device.
+   */
+  lowLatency: z.boolean(),
 })
 
 export type CaptureFormat = z.infer<typeof captureFormatSchema>

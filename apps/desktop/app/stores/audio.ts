@@ -72,10 +72,16 @@ export const useAudioStore = defineStore('audio', () => {
    * operator chasing latency should know the interface is not running at the
    * requested rate natively.
    */
-  const engineConverting = computed(() => {
-    const current = format.value as (typeof format)['value'] & { engineConverted?: boolean }
-    return current?.engineConverted === true
-  })
+  const engineConverting = computed(() => format.value?.engineConverted === true)
+
+  /**
+   * True when capture is on the low-latency shared path.
+   *
+   * Worth distinguishing from a small `periodFrames` alone: it tells an
+   * operator the period is small *because* the engine granted it, rather than
+   * because this driver happens to have a short default.
+   */
+  const lowLatency = computed(() => format.value?.lowLatency === true)
 
   /** True when the meter has not updated recently despite capture running. */
   const meterStalled = computed(() => {
@@ -206,6 +212,7 @@ export const useAudioStore = defineStore('audio', () => {
     channelOptions,
     deviceLost,
     engineConverting,
+    lowLatency,
     meterStalled,
     isClipping,
     clipCount,

@@ -28,8 +28,9 @@ use tracing::{debug, error, info, warn};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT,
-    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-    AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, IAudioCaptureClient, IAudioClient, WAVEFORMATEX,
+    AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+    IAudioCaptureClient, IAudioClient, IMMDevice, WAVEFORMATEX,
 };
 use windows::Win32::System::Threading::{
     AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, CreateEventW,
@@ -39,8 +40,9 @@ use windows::core::w;
 
 use crate::error::{CaptureError, Result};
 use crate::wasapi::{
-    ComApartment, REFTIMES_PER_MILLISEC, activate_client, build_format, device_periods, mix_format,
-    open_device, share_mode_flag,
+    ComApartment, REFTIMES_PER_MILLISEC, activate_client, build_format, current_engine_period,
+    device_periods, frames_to_reference_time, initialise_shared_low_latency, mix_format,
+    open_device, share_mode_flag, shared_mode_periods,
 };
 
 /// How long the capture loop waits for a driver buffer before deciding the
@@ -55,6 +57,14 @@ const MAX_CONSECUTIVE_TIMEOUTS: u32 = 4;
 /// only ~1 MB of `f32` and it absorbs a Windows scheduling stall without a
 /// dropout.
 const DEFAULT_RING_MILLIS: f64 = 250.0;
+
+/// Buffer depth requested on the default initialisation path, in milliseconds.
+///
+/// Three capture periods at the usual 10 ms: enough that a single late
+/// wake-up does not lose audio, without adding meaningful latency. The
+/// low-latency path does not use this — there the system sizes the buffer from
+/// the period we ask for.
+const DEFAULT_BUFFER_MILLIS: i64 = 30;
 
 /// What to open and how.
 #[derive(Debug, Clone)]
@@ -161,9 +171,17 @@ impl CaptureStats {
 pub struct NegotiatedCapture {
     /// Format of the stream the driver is handing us.
     pub format: AudioFormat,
-    /// Capture period in frames, as granted.
+    /// Capture period in frames, as actually granted.
+    ///
+    /// Not the driver's *default* period, which is what this used to report:
+    /// that figure does not move when the engine is running on a different
+    /// period, so it would have shown 10 ms whatever we negotiated.
     pub period_frames: u32,
     pub share_mode: ShareMode,
+    /// True when the `IAudioClient3` low-latency shared path was granted,
+    /// giving a period below the driver's default without taking the device
+    /// away from other applications.
+    pub low_latency: bool,
     /// True when the Windows audio engine is resampling for us because the
     /// endpoint's own rate differs from the one we asked for. Worth surfacing:
     /// it costs a little latency and a little quality.
@@ -317,7 +335,10 @@ fn capture_main(
         channels = prepared.negotiated.format.channels,
         format = prepared.negotiated.format.sample_format.as_str(),
         period_frames = prepared.negotiated.period_frames,
+        period_ms = (f64::from(prepared.negotiated.period_frames) * 1_000.0)
+            / f64::from(prepared.negotiated.format.sample_rate.max(1)),
         engine_converted = prepared.negotiated.engine_converted,
+        low_latency = prepared.negotiated.low_latency,
         "capture started"
     );
 
@@ -377,40 +398,15 @@ fn prepare(config: &CaptureConfig) -> Result<Prepared> {
         stream_flags |= AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
     }
 
-    let wave = build_format(&desired);
-    let wave_ptr = core::ptr::from_ref(&wave).cast::<WAVEFORMATEX>();
-
-    // Ask for a buffer three capture periods deep: enough that a single late
-    // wake-up does not lose audio, without adding meaningful latency.
-    let buffer_duration = 30 * REFTIMES_PER_MILLISEC;
-
-    // SAFETY: `wave` outlives the Initialize call. Periodicity must be 0 when
-    // AUTOCONVERTPCM is set, and 0 is also "driver default" otherwise.
-    unsafe {
-        client.Initialize(
-            share_mode_flag(config.share_mode),
-            stream_flags,
-            buffer_duration,
-            0,
-            wave_ptr,
-            None,
-        )
-    }
-    .map_err(|error| {
-        if error.code() == windows::Win32::Media::Audio::AUDCLNT_E_DEVICE_INVALIDATED {
-            CaptureError::DeviceDisconnected
-        } else {
-            CaptureError::FormatUnsupported(format!(
-                "{} Hz, {} ch, {} in {} mode was refused: {} (0x{:08X})",
-                desired.sample_rate,
-                desired.channels,
-                desired.sample_format.as_str(),
-                config.share_mode.as_str(),
-                error.message(),
-                error.code().0
-            ))
-        }
-    })?;
+    let stream = initialise_stream(
+        &device,
+        client,
+        &desired,
+        config.share_mode,
+        stream_flags,
+        engine_converted,
+    )?;
+    let Stream { client, period_frames, low_latency } = stream;
 
     // SAFETY: a manual-reset=false, initially-unsignalled, unnamed event.
     let event = unsafe { CreateEventW(None, false, false, w!("")) }
@@ -424,8 +420,6 @@ fn prepare(config: &CaptureConfig) -> Result<Prepared> {
 
     let capture = unsafe { client.GetService::<IAudioCaptureClient>() }?;
     let buffer_frames = unsafe { client.GetBufferSize() }?;
-    let (default_period, _minimum_period) = device_periods(&client, desired.sample_rate);
-    let period_frames = default_period.unwrap_or(buffer_frames);
 
     // The driver can hand over up to a whole buffer in one go, so the scratch
     // space is sized for the worst case and never grows afterwards.
@@ -443,9 +437,213 @@ fn prepare(config: &CaptureConfig) -> Result<Prepared> {
             period_frames,
             share_mode: config.share_mode,
             engine_converted,
+            low_latency,
         },
         mono,
     })
+}
+
+/// An initialised capture stream, and what the driver agreed to.
+struct Stream {
+    /// The client in use. An alignment retry may have replaced the one that
+    /// was passed in.
+    client: IAudioClient,
+    /// Capture period in frames, as actually granted.
+    period_frames: u32,
+    low_latency: bool,
+}
+
+/// Outcome of trying the `IAudioClient3` low-latency shared path.
+enum LowLatency {
+    /// Granted. The client is initialised, at this period in frames.
+    Granted(u32),
+    /// Not attempted: no `IAudioClient3`, or no period better than the
+    /// default. The client was not touched and can still be initialised the
+    /// ordinary way.
+    NotAttempted,
+    /// Attempted and refused. The client may have been left part-initialised,
+    /// so the caller replaces it rather than reasoning about what state a
+    /// failed `Initialize` leaves behind.
+    Refused,
+}
+
+/// Initialises the capture stream, preferring the smallest period available.
+fn initialise_stream(
+    device: &IMMDevice,
+    client: IAudioClient,
+    format: &AudioFormat,
+    share_mode: ShareMode,
+    stream_flags: u32,
+    engine_converted: bool,
+) -> Result<Stream> {
+    let mut client = client;
+
+    // The low-latency path is shared-mode only and cannot resample, so it is
+    // available exactly when we are sharing the engine *and* asking for a
+    // format it will carry natively.
+    if share_mode == ShareMode::Shared && !engine_converted {
+        match try_low_latency(&client, format, stream_flags) {
+            LowLatency::Granted(period_frames) => {
+                return Ok(Stream { client, period_frames, low_latency: true });
+            }
+            LowLatency::NotAttempted => {}
+            LowLatency::Refused => client = activate_client(device)?,
+        }
+    }
+
+    initialise_default(device, client, format, share_mode, stream_flags)
+}
+
+/// Tries to open the stream at the smallest period the engine will allow.
+fn try_low_latency(
+    client: &IAudioClient,
+    format: &AudioFormat,
+    stream_flags: u32,
+) -> LowLatency {
+    let Some(periods) = shared_mode_periods(client, format) else {
+        return LowLatency::NotAttempted;
+    };
+    let Some(period) = periods.smallest_legal() else {
+        return LowLatency::NotAttempted;
+    };
+    if period >= periods.default_frames {
+        // Nothing to gain. Asking anyway would move the engine period for
+        // every other application on the machine for no benefit at all.
+        debug!(
+            period,
+            default = periods.default_frames,
+            "driver offers no period below its default"
+        );
+        return LowLatency::NotAttempted;
+    }
+
+    match initialise_shared_low_latency(client, format, stream_flags, period) {
+        Ok(()) => {
+            info!(
+                period_frames = period,
+                default_period_frames = periods.default_frames,
+                "opened on the low-latency shared path"
+            );
+            LowLatency::Granted(period)
+        }
+        Err(error) => {
+            // Commonly AUDCLNT_E_ENGINE_PERIODICITY_LOCKED: something else got
+            // there first and fixed the engine period. Not a failure — we take
+            // the period already in force and still capture.
+            debug!(%error, period, "low-latency shared mode refused; using the default period");
+            LowLatency::Refused
+        }
+    }
+}
+
+/// Initialises at the driver's default period, retrying once if the driver
+/// insists on a buffer aligned to a whole number of periods.
+fn initialise_default(
+    device: &IMMDevice,
+    client: IAudioClient,
+    format: &AudioFormat,
+    share_mode: ShareMode,
+    stream_flags: u32,
+) -> Result<Stream> {
+    let wave = build_format(format);
+    let wave_ptr = core::ptr::from_ref(&wave).cast::<WAVEFORMATEX>();
+    let buffer_duration = DEFAULT_BUFFER_MILLIS * REFTIMES_PER_MILLISEC;
+
+    // SAFETY: `wave` outlives every call below. Periodicity must be 0 when
+    // AUTOCONVERTPCM is set, and 0 is also "driver default" otherwise.
+    let attempt = unsafe {
+        client.Initialize(
+            share_mode_flag(share_mode),
+            stream_flags,
+            buffer_duration,
+            0,
+            wave_ptr,
+            None,
+        )
+    };
+
+    match attempt {
+        Ok(()) => Ok(Stream {
+            period_frames: granted_period(&client, format, share_mode),
+            client,
+            low_latency: false,
+        }),
+        Err(error) if error.code() == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED => {
+            // Exclusive mode on hardware that insists the buffer be a whole
+            // number of periods, and ours was not. The documented recovery is
+            // to ask the failed client what size it wanted and start again: a
+            // client that failed this way cannot be reinitialised.
+            let aligned_frames = unsafe { client.GetBufferSize() }?;
+            drop(client);
+
+            let aligned = frames_to_reference_time(aligned_frames, format.sample_rate);
+            let client = activate_client(device)?;
+            // Exclusive mode wants the periodicity to match the buffer exactly;
+            // shared mode requires it to be 0.
+            let periodicity = match share_mode {
+                ShareMode::Exclusive => aligned,
+                ShareMode::Shared => 0,
+            };
+            // SAFETY: as above, with the size the driver asked for.
+            unsafe {
+                client.Initialize(
+                    share_mode_flag(share_mode),
+                    stream_flags,
+                    aligned,
+                    periodicity,
+                    wave_ptr,
+                    None,
+                )
+            }
+            .map_err(|error| initialise_error(&error, format, share_mode))?;
+
+            info!(aligned_frames, "reinitialised with the buffer size the driver asked for");
+            Ok(Stream { client, period_frames: aligned_frames, low_latency: false })
+        }
+        Err(error) => Err(initialise_error(&error, format, share_mode)),
+    }
+}
+
+/// The capture period the driver is actually using, in frames.
+///
+/// A ladder, most specific answer first, because the figure feeds the latency
+/// breakdown an operator reads.
+fn granted_period(client: &IAudioClient, format: &AudioFormat, share_mode: ShareMode) -> u32 {
+    // Shared mode only: this reports the *engine's* period, which is what our
+    // stream runs at when we share the engine and is meaningless when we do
+    // not.
+    if share_mode == ShareMode::Shared {
+        if let Some(period) = current_engine_period(client) {
+            return period;
+        }
+    }
+    let (default_frames, _minimum) = device_periods(client, format.sample_rate);
+    if let Some(frames) = default_frames {
+        return frames;
+    }
+    // Last resort: the whole buffer. Clamped above zero so the latency
+    // breakdown cannot divide by it.
+    unsafe { client.GetBufferSize() }.unwrap_or(1).max(1)
+}
+
+/// Turns an `Initialize` failure into something an operator can act on.
+fn initialise_error(
+    error: &windows::core::Error,
+    format: &AudioFormat,
+    share_mode: ShareMode,
+) -> CaptureError {
+    if error.code() == windows::Win32::Media::Audio::AUDCLNT_E_DEVICE_INVALIDATED {
+        return CaptureError::DeviceDisconnected;
+    }
+    CaptureError::FormatUnsupported(format!(
+        "{} Hz, {} ch, {} in {} mode was refused: {} (0x{:08X})",
+        format.sample_rate,
+        format.channels,
+        format.sample_format.as_str(),
+        share_mode.as_str(),
+        error.message(),
+        error.code().0
+    ))
 }
 
 /// Decides what format to request.

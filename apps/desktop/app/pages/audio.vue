@@ -242,7 +242,10 @@ async function runTest() {
         </div>
         <div>
           <dt class="text-xs text-stage-muted">Sharing mode</dt>
-          <dd class="mt-0.5 capitalize">{{ audio.format.shareMode }}</dd>
+          <dd class="mt-0.5 capitalize">
+            {{ audio.format.shareMode
+            }}<span v-if="audio.lowLatency" class="text-stage-muted"> (low latency)</span>
+          </dd>
         </div>
         <div>
           <dt class="text-xs text-stage-muted">Engine resampling</dt>

@@ -148,16 +148,10 @@ impl StageLinkHandler {
             .and_then(|rate| u32::try_from(rate).ok())
             .unwrap_or(settings.audio.sample_rate);
 
-        let share_mode = match params.get("shareMode").and_then(Value::as_str) {
-            Some("exclusive") => audio_core::ShareMode::Exclusive,
-            Some("shared") | None => audio_core::ShareMode::Shared,
-            Some(other) => {
-                return Err(Self::invalid(
-                    format!("{other} is not a valid share mode"),
-                    "params.shareMode",
-                ));
-            }
-        };
+        let share_mode = resolve_share_mode(
+            params.get("shareMode").and_then(Value::as_str),
+            settings.share_mode(),
+        )?;
 
         let state = Arc::clone(&self.state);
         let device_for_task = device_id.clone();
@@ -1067,6 +1061,29 @@ impl ControlHandler for StageLinkHandler {
     }
 }
 
+/// Decides which share mode a `audio.selectDevice` call should use.
+///
+/// An absent `shareMode` means "leave it as it is", not "shared". The desktop
+/// UI never sends one, so treating absence as shared reset the stored
+/// preference on every device selection — which made exclusive mode impossible
+/// to keep, including for an operator who had set it in `settings.json` by
+/// hand. Free function so the decision is testable without a capture device.
+fn resolve_share_mode(
+    requested: Option<&str>,
+    stored: audio_core::ShareMode,
+) -> Result<audio_core::ShareMode, ServiceErrorPayload> {
+    match requested {
+        Some("exclusive") => Ok(audio_core::ShareMode::Exclusive),
+        Some("shared") => Ok(audio_core::ShareMode::Shared),
+        None => Ok(stored),
+        Some(other) => Err(ServiceErrorPayload::new(
+            "INVALID_REQUEST",
+            format!("{other} is not a valid share mode"),
+        )
+        .with_field("params.shareMode")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1239,6 +1256,47 @@ mod tests {
             .await
             .expect_err("an unknown share mode must be refused");
         assert_eq!(error.field.as_deref(), Some("params.shareMode"));
+    }
+
+    /// The regression: selecting a device must not quietly reset the operator's
+    /// sharing mode. The desktop UI never sends `shareMode`, so if absence
+    /// meant "shared", exclusive mode could never survive a device selection.
+    #[test]
+    fn an_absent_share_mode_keeps_the_stored_preference() {
+        use audio_core::ShareMode;
+
+        assert_eq!(
+            resolve_share_mode(None, ShareMode::Exclusive).unwrap(),
+            ShareMode::Exclusive,
+            "omitting the field must not overwrite a stored exclusive preference"
+        );
+        assert_eq!(
+            resolve_share_mode(None, ShareMode::Shared).unwrap(),
+            ShareMode::Shared
+        );
+    }
+
+    #[test]
+    fn an_explicit_share_mode_overrides_the_stored_preference() {
+        use audio_core::ShareMode;
+
+        assert_eq!(
+            resolve_share_mode(Some("shared"), ShareMode::Exclusive).unwrap(),
+            ShareMode::Shared
+        );
+        assert_eq!(
+            resolve_share_mode(Some("exclusive"), ShareMode::Shared).unwrap(),
+            ShareMode::Exclusive
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_share_mode_names_the_offending_field() {
+        let error = resolve_share_mode(Some("telepathic"), audio_core::ShareMode::Shared)
+            .expect_err("an unknown share mode must be refused");
+        assert_eq!(error.code, "INVALID_REQUEST");
+        assert_eq!(error.field.as_deref(), Some("params.shareMode"));
+        assert!(error.message.contains("telepathic"));
     }
 
     #[tokio::test]
