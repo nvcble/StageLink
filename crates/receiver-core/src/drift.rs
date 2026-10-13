@@ -60,9 +60,14 @@ pub struct DriftConfig {
     /// caller should skip forward with a fade instead, paying one soft
     /// discontinuity to get the latency back immediately.
     ///
-    /// The default is 40 ms, which is more than an entire buffer at the Normal
-    /// preset: being that far over target means an outage happened, not that
-    /// two crystals disagree.
+    /// Defaults to **one whole target buffer**, so the rule is "being more than
+    /// a buffer over target means an outage happened, not that two crystals
+    /// disagree". That was the stated intent all along, but it was written as a
+    /// fixed 40 ms, which only made it true at the Normal preset: a Tight
+    /// listener could sit at 60 ms — three times the 20 ms they asked for —
+    /// without ever crossing it, and at the steady clamp that takes 80 seconds
+    /// to drain. Deriving it from the target keeps Normal exactly as it was and
+    /// makes the other presets mean what they say.
     pub skip_above_frames: usize,
 }
 
@@ -76,8 +81,7 @@ impl DriftConfig {
             settle_seconds: 15.0,
             filter_seconds: 2.0,
             burst_budget_seconds: 5.0,
-            // 40 ms.
-            skip_above_frames: (sample_rate as usize) * 40 / 1_000,
+            skip_above_frames: target_frames,
         }
     }
 }
@@ -156,8 +160,15 @@ impl DriftController {
     /// The integral is kept: the clock difference it has learned is still true,
     /// and discarding it would make every target change re-learn it over the
     /// following minute.
+    /// Moves the depth the controller steers towards.
+    ///
+    /// The skip threshold moves with it, because it is defined *relative* to
+    /// the target — one whole buffer over. Leaving it behind would mean a
+    /// listener who switched from Safe to Tight kept Safe's tolerance for
+    /// excess depth while being promised Tight's latency.
     pub fn set_target_frames(&mut self, frames: usize) {
         self.config.target_frames = frames;
+        self.config.skip_above_frames = frames;
     }
 
     #[must_use]
@@ -411,6 +422,57 @@ mod tests {
                 controller.learned_ppm()
             );
         }
+    }
+
+    /// The skip threshold is "one whole buffer over target", which was the
+    /// stated intent but was written as a fixed 40 ms — true only at the Normal
+    /// preset.
+    #[test]
+    fn the_skip_threshold_is_one_whole_target_buffer() {
+        // Normal: 40 ms at 48 kHz, exactly the figure this replaced.
+        assert_eq!(DriftConfig::new(RATE, TARGET).skip_above_frames, TARGET);
+        // Tight: 20 ms. Under the old fixed threshold a Tight listener could
+        // sit at 60 ms — three times what they asked for — without crossing it.
+        assert_eq!(DriftConfig::new(RATE, 960).skip_above_frames, 960);
+        // Safe: 80 ms, which tolerates more before paying an audible skip,
+        // which is the whole point of choosing Safe.
+        assert_eq!(DriftConfig::new(RATE, 3_840).skip_above_frames, 3_840);
+    }
+
+    #[test]
+    fn moving_the_target_moves_the_skip_threshold_with_it() {
+        let mut controller = controller();
+        assert_eq!(controller.config.skip_above_frames, TARGET);
+
+        controller.set_target_frames(960);
+
+        assert_eq!(controller.target_frames(), 960);
+        assert_eq!(
+            controller.config.skip_above_frames, 960,
+            "a listener switching to Tight must not keep Normal's tolerance for excess depth"
+        );
+    }
+
+    /// The behavioural consequence: the same 30 ms of excess is worth a skip to
+    /// a Tight listener and not to a Normal one.
+    #[test]
+    fn a_tighter_preset_asks_for_a_skip_at_a_depth_a_looser_one_tolerates() {
+        const TIGHT: usize = 960; // 20 ms
+        const EXCESS: f64 = 1_440.0; // 30 ms
+
+        let mut tight = DriftController::new(DriftConfig::new(RATE, TIGHT));
+        simulate(&mut tight, 0.0, TIGHT as f64 + EXCESS, 5.0);
+        assert!(
+            tight.excess_needs_skip(),
+            "30 ms over a 20 ms target is more than a whole buffer and should skip"
+        );
+
+        let mut normal = controller();
+        simulate(&mut normal, 0.0, TARGET as f64 + EXCESS, 5.0);
+        assert!(
+            !normal.excess_needs_skip(),
+            "30 ms over a 40 ms target is within a buffer and should be resampled away"
+        );
     }
 
     /// A small excess is retired by resampling, inaudibly.

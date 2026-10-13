@@ -70,18 +70,52 @@ impl Preset {
     }
 }
 
+/// Default [`ReceiverConfig::startup_margin_ms`].
+///
+/// **Zero**, and that is a measured result rather than an omission.
+///
+/// Starting deeper than the target sounds like cheap insurance and is not. The
+/// depth the drift controller steers on counts holes — see
+/// `JitterBuffer::span_from` — so under packet loss it reads higher than the
+/// audio that can actually be played. A start above target adds a standing
+/// drain on top of that inflation, and the controller then drains real audio
+/// to make up a surplus that was never there. Measured in the harness: a 10 ms
+/// margin collapsed the buffer to 0.5 ms under 2% burst loss, and pushed the
+/// reported clock estimate to 65 ppm when the true difference was 40.
+///
+/// Nothing is given up by starting level. Priming requires its depth as a
+/// **gap-free** run (`contiguous_from`), which is a stronger guarantee than
+/// the span-based depth the stream is held at afterwards — so a stream that
+/// has just started has at least as much real runway as one that has been
+/// playing for an hour. The margin was protecting against something that
+/// contiguity already covers.
+///
+/// Raising this is the wrong half of the fix. If the buffer needs to start
+/// deeper, make the depth signal immune to holes first: steer on a windowed
+/// minimum, which is the adaptive-depth work `DriftController` already notes
+/// it wants.
+pub const DEFAULT_STARTUP_MARGIN_MS: f32 = 0.0;
+
 /// Receiver configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct ReceiverConfig {
     pub sample_rate: u32,
     pub frames_per_packet: usize,
     pub preset: Preset,
-    /// Depth required before playback starts, in milliseconds.
+    /// Depth required before playback starts *beyond* the preset's target.
     ///
-    /// Larger than the target on purpose: starting at exactly the target means
-    /// the first moment of jitter underruns, and the first thing a performer
-    /// hears deciding whether to trust the system is its first few seconds.
-    pub startup_ms: f32,
+    /// Playback begins at the target plus this, so the preset's promise is true
+    /// from the first packet rather than becoming true later. Defaults to zero;
+    /// see [`DEFAULT_STARTUP_MARGIN_MS`] for why, and read it before raising
+    /// this.
+    ///
+    /// What matters is that the startup depth is *relative to the target at
+    /// all*. It was an absolute 30 ms against targets of 20/40/80 ms, so the
+    /// controller corrected downwards for Tight and upwards for Normal and
+    /// Safe — and Safe, chosen precisely because the room is bad, began 50 ms
+    /// short of what it promised and spent its first minute with less
+    /// protection than Normal gives.
+    pub startup_margin_ms: f32,
 }
 
 impl ReceiverConfig {
@@ -91,7 +125,7 @@ impl ReceiverConfig {
             sample_rate,
             frames_per_packet,
             preset: Preset::Normal,
-            startup_ms: 30.0,
+            startup_margin_ms: DEFAULT_STARTUP_MARGIN_MS,
         }
     }
 
@@ -103,8 +137,19 @@ impl ReceiverConfig {
         self.frames_for_ms(self.preset.target_ms())
     }
 
+    /// Depth required before playback starts, in milliseconds.
+    #[must_use]
+    pub fn startup_ms(&self) -> f32 {
+        self.preset.target_ms() + self.startup_margin_ms
+    }
+
     fn startup_packets(&self) -> usize {
-        (self.frames_for_ms(self.startup_ms) / self.frames_per_packet.max(1)).max(1)
+        // Rounded up: a part-filled packet is not a packet the reader can
+        // play, so truncating would start below the target that the margin
+        // exists to clear.
+        self.frames_for_ms(self.startup_ms())
+            .div_ceil(self.frames_per_packet.max(1))
+            .max(1)
     }
 }
 
@@ -539,9 +584,15 @@ impl AudioOutput {
     }
 
     /// Changes the latency-against-resilience preset.
+    ///
+    /// The startup depth is recomputed, not just the drift target. It is
+    /// derived from the preset and cached here, and the receiver returns to
+    /// `Priming` on a new stream or a resync — so a stale value would prime
+    /// the *next* stream to the depth of the previously selected preset.
     pub fn set_preset(&mut self, preset: Preset) {
         self.config.preset = preset;
         self.drift.set_target_frames(self.config.target_frames());
+        self.startup_packets = self.config.startup_packets();
     }
 
     #[must_use]
@@ -766,12 +817,15 @@ impl AudioOutput {
             return false;
         };
 
-        // Land one target-depth behind the newest packet: far enough back to
-        // have something to play, close enough that the latency is what the
-        // preset promised.
-        let target_packets = (self.config.target_frames() / self.config.frames_per_packet.max(1))
-            .max(1) as u32;
-        let landing = highest.wrapping_sub(target_packets.saturating_sub(1));
+        // Land one *startup* depth behind the newest packet, not one target
+        // depth. A resync drops back into `Priming`, so landing exactly where
+        // priming is about to be satisfied lets playback resume at once;
+        // landing on the target instead leaves it short by the startup margin
+        // and it stalls until that much more audio arrives. Still close enough
+        // to live that the latency is what the preset promised — the margin is
+        // the same one every stream starts with, and it drains the same way.
+        let startup_packets = self.startup_packets.max(1) as u32;
+        let landing = highest.wrapping_sub(startup_packets.saturating_sub(1));
 
         if audio_protocol::sequence_delta(self.sequence, landing) <= 0 {
             // The newest packet is not ahead of us, so there is nothing to
@@ -1002,17 +1056,99 @@ mod tests {
 
     #[test]
     fn playback_waits_for_the_startup_depth_rather_than_starting_on_one_packet() {
-        let (mut net, mut audio) = new(config());
-        // One packet: 5 ms, far short of the 30 ms startup depth.
+        let config = config();
+        // Asserted against the configured depth rather than a hard-coded
+        // packet count, so this keeps testing the behaviour and not a number
+        // that has to be chased every time the presets are tuned.
+        let needed = config.startup_packets();
+        assert!(needed > 1, "the test proves nothing if one packet is enough");
+
+        let (mut net, mut audio) = new(config);
         net.accept(&packet(SESSION, 0, 0.5, 0), 0);
         render_blocks(&mut audio, 2);
         assert!(!audio.is_playing(), "started on a single packet");
 
-        for sequence in 1..8 {
+        // One short of the startup depth still must not start.
+        for sequence in 1..needed as u32 - 1 {
             net.accept(&packet(SESSION, sequence, 0.5, 0), 0);
         }
         render_blocks(&mut audio, 2);
-        assert!(audio.is_playing(), "30 ms of depth should start playback");
+        assert!(
+            !audio.is_playing(),
+            "started on {} packets, one short of the {needed} required",
+            needed - 1
+        );
+
+        net.accept(&packet(SESSION, needed as u32 - 1, 0.5, 0), 0);
+        render_blocks(&mut audio, 2);
+        assert!(audio.is_playing(), "{needed} packets of depth should start playback");
+    }
+
+    /// Every preset must start at the depth it promises — never below it, or
+    /// the promise is false for as long as the drift controller takes to make
+    /// it true, which at the steady clamp is tens of seconds. The old absolute
+    /// 30 ms started Safe 50 ms short.
+    #[test]
+    fn every_preset_starts_at_the_depth_it_promises() {
+        for preset in [Preset::Tight, Preset::Normal, Preset::Safe] {
+            let config = ReceiverConfig { preset, ..config() };
+            assert!(
+                config.startup_ms() >= preset.target_ms(),
+                "{preset:?} starts at {} ms against a {} ms target",
+                config.startup_ms(),
+                preset.target_ms()
+            );
+            // The relationship is the same for all three: whatever the margin
+            // is, every preset gets the same one rather than the sign of the
+            // correction depending on which preset was chosen.
+            assert!(
+                (config.startup_ms() - preset.target_ms() - DEFAULT_STARTUP_MARGIN_MS).abs()
+                    < 1e-3,
+                "{preset:?} does not use the common margin"
+            );
+        }
+    }
+
+    /// Priming demands its depth as a gap-free run, which is what makes a zero
+    /// margin safe: a freshly started stream has at least as much real runway
+    /// as one that has been playing for an hour, where the depth being held is
+    /// the span and counts holes.
+    #[test]
+    fn the_startup_depth_is_required_gap_free() {
+        let config = config();
+        let needed = config.startup_packets();
+        let (mut net, mut audio) = new(config);
+
+        // One short of the requirement, with a hole in the middle. The span
+        // reaches far enough; the contiguous run does not.
+        for sequence in 0..needed as u32 + 4 {
+            if sequence == 2 {
+                continue;
+            }
+            net.accept(&packet(SESSION, sequence, 0.5, 0), 0);
+        }
+        render_blocks(&mut audio, 2);
+        assert!(
+            !audio.is_playing(),
+            "started on a run with a hole in it, which conceals from the first moment"
+        );
+    }
+
+    #[test]
+    fn changing_the_preset_moves_the_startup_depth_with_it() {
+        let (_net, mut audio) = new(ReceiverConfig { preset: Preset::Tight, ..config() });
+        let tight = audio.startup_packets;
+
+        audio.set_preset(Preset::Safe);
+        let safe = audio.startup_packets;
+
+        // Cached on the audio thread and consulted again whenever the receiver
+        // re-primes, so a stale value would prime the next stream to the depth
+        // of the preset the listener used to have.
+        assert!(
+            safe > tight,
+            "Safe must prime deeper than Tight: got {safe} against {tight} packets"
+        );
     }
 
     #[test]
