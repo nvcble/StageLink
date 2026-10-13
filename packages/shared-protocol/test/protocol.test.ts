@@ -408,3 +408,41 @@ describe('structured errors', () => {
     expect(error.field).toBe('params.channelIndex')
   })
 })
+
+describe('additive fields tolerate an older service', () => {
+  /** What a service built before `lowLatency` existed actually sends. */
+  const legacyStatus = {
+    state: 'running',
+    device: null,
+    channelIndex: 0,
+    format: {
+      sampleRate: 48_000,
+      deviceChannels: 2,
+      deviceSampleFormat: 'f32',
+      periodFrames: 480,
+      shareMode: 'shared',
+    },
+    framesCaptured: 1_000,
+    xruns: 0,
+    deviceConnected: true,
+    startedAt: 1,
+    lastError: null,
+  }
+
+  it('accepts audio.selectDevice from a service that omits them', () => {
+    // Requiring these broke the one action an operator cannot work around.
+    const parsed = METHODS['audio.selectDevice'].result.safeParse(legacyStatus)
+    expect(parsed.success).toBe(true)
+    expect(parsed.data?.format?.lowLatency).toBe(false)
+    expect(parsed.data?.format?.engineConverted).toBe(false)
+  })
+
+  it('still carries them when the service does send them', () => {
+    const parsed = METHODS['audio.selectDevice'].result.safeParse({
+      ...legacyStatus,
+      format: { ...legacyStatus.format, engineConverted: true, lowLatency: true },
+    })
+    expect(parsed.data?.format?.lowLatency).toBe(true)
+    expect(parsed.data?.format?.engineConverted).toBe(true)
+  })
+})

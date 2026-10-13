@@ -565,6 +565,38 @@ mod tests {
         assert_eq!(warnings[0]["code"], "NO_ADAPTER_SELECTED");
     }
 
+    /// The other half of the `audio.selectDevice` contract: the renderer
+    /// validates this payload, so every field its schema reads has to be here.
+    /// `lowLatency` was added to the schema and the serialiser in the same
+    /// change, but a service binary built before it fails validation — hence
+    /// the schema defaults these rather than requiring them.
+    #[test]
+    fn a_negotiated_format_reports_both_of_its_advisory_flags() {
+        let status = AudioStatus {
+            state: crate::audio_engine::CaptureState::Running,
+            device: None,
+            channel_index: Some(0),
+            negotiated: Some(audio_capture::NegotiatedCapture {
+                format: audio_core::AudioFormat::new(48_000, 2, audio_core::SampleFormat::F32),
+                period_frames: 128,
+                share_mode: audio_core::ShareMode::Shared,
+                engine_converted: false,
+                low_latency: true,
+            }),
+            frames_captured: 1,
+            xruns: 0,
+            device_connected: true,
+            started_at: Some(1),
+            last_error: None,
+            realtime_granted: true,
+        };
+
+        let format = &audio_status(&status)["format"];
+        assert_eq!(format["lowLatency"], true);
+        assert_eq!(format["engineConverted"], false);
+        assert_eq!(format["periodFrames"], 128);
+    }
+
     #[test]
     fn discovery_is_reported_as_inactive_until_it_is_actually_publishing() {
         let settings = AppSettings::default();

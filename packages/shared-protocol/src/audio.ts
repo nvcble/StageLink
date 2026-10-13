@@ -73,13 +73,23 @@ export const captureFormatSchema = z.object({
    * against this schema and the parsed result is what reaches the renderer, so
    * an undeclared field is silently stripped on the way through. This one was,
    * which meant the resampling warning never fired on a pushed status event.
+   *
+   * Defaulted, not required — see the note below.
    */
-  engineConverted: z.boolean(),
+  engineConverted: z.boolean().default(false),
   /**
    * Whether the `IAudioClient3` low-latency shared path was granted, giving a
    * period below the driver's default without locking the device.
+   *
+   * Defaulted for the same reason as `engineConverted`. Both are additive and
+   * purely informational — a badge and a warning — and `audio.selectDevice` is
+   * validated against this schema, so requiring them let a service built
+   * before they existed fail the one action an operator cannot work around:
+   * choosing their input. A latency badge must never stand between a performer
+   * and their monitor mix. Absent reads as `false`, which is the truthful
+   * answer for a service that cannot report it.
    */
-  lowLatency: z.boolean(),
+  lowLatency: z.boolean().default(false),
 })
 
 export type CaptureFormat = z.infer<typeof captureFormatSchema>

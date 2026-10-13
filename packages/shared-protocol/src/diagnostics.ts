@@ -56,9 +56,9 @@ export const audioDiagnosticsSchema = z.object({
    * to keep up with the send cadence, and the audio either side of a trim is
    * not continuous. A figure that keeps climbing is the one to act on.
    */
-  latencyTrims: z.number().int().min(0),
+  latencyTrims: z.number().int().min(0).default(0),
   /** Audio those trims discarded, in milliseconds. */
-  latencyTrimmedMs: z.number().min(0),
+  latencyTrimmedMs: z.number().min(0).default(0),
   /** Driver-reported discontinuities. */
   xruns: z.number().int().min(0),
   /** Worst observed capture-callback duration, microseconds. */
