@@ -13,6 +13,8 @@ import {
   toServiceError,
 } from '@stagelink/shared-protocol'
 
+import { droppedKeys } from '../electron/ipc/payload-shape'
+
 /**
  * IPC contract tests.
  *
@@ -226,5 +228,42 @@ describe('error envelopes', () => {
     expect(isBridgeErrorPayload(undefined)).toBe(false)
     expect(isBridgeErrorPayload('error')).toBe(false)
     expect(isBridgeErrorPayload({ __stagelinkError: 'yes' })).toBe(false)
+  })
+})
+
+describe('fields the protocol silently discards', () => {
+  it('finds an undeclared field nested inside a declared object', () => {
+    // The real case: `engineConverted` was sent on every audio.status event and
+    // not declared, so zod stripped it and the renderer's resampling warning
+    // could never fire. A shallow comparison would not have caught it.
+    const sent = { state: 'running', format: { sampleRate: 48000, engineConverted: true } }
+    const kept = { state: 'running', format: { sampleRate: 48000 } }
+    expect(droppedKeys(sent, kept)).toEqual(['format.engineConverted'])
+  })
+
+  it('says nothing when the schema carried everything', () => {
+    const payload = { state: 'running', format: { sampleRate: 48000, lowLatency: false } }
+    // Parsed output is a different object with the same shape, as zod returns.
+    expect(droppedKeys(payload, structuredClone(payload))).toEqual([])
+  })
+
+  it('reports several losses at once, top level and nested', () => {
+    const sent = { a: 1, b: { c: 2, d: 3 }, e: 4 }
+    const kept = { b: { c: 2 } }
+    expect(droppedKeys(sent, kept).sort()).toEqual(['a', 'b.d', 'e'])
+  })
+
+  it('does not descend into arrays, whose indices would mean nothing in a log', () => {
+    const sent = { receivers: [{ id: 'a', extra: 1 }] }
+    const kept = { receivers: [{ id: 'a' }] }
+    expect(droppedKeys(sent, kept)).toEqual([])
+  })
+
+  it('tolerates nulls and primitives where an object was expected', () => {
+    expect(droppedKeys(null, { a: 1 })).toEqual([])
+    expect(droppedKeys({ a: 1 }, null)).toEqual([])
+    expect(droppedKeys('text', 'text')).toEqual([])
+    // A declared field whose value became null is present, not dropped.
+    expect(droppedKeys({ a: { b: 1 } }, { a: null })).toEqual([])
   })
 })

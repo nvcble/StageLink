@@ -1652,6 +1652,27 @@ mod tests {
         );
     }
 
+    /// The trim counters have to reach the operator, not stop at the service
+    /// boundary. A silent recovery is exactly how a quarter-second of delay
+    /// went unnoticed in the first place.
+    #[tokio::test]
+    async fn the_backlog_trim_counters_are_published() {
+        let handler = handler();
+        let snapshot = handler
+            .handle("diagnostics.getSnapshot", Value::Null)
+            .await
+            .unwrap();
+
+        let audio = &snapshot["audio"];
+        // Present and zero on an idle service, rather than absent: the
+        // dashboard's warning reads them unconditionally, and a missing field
+        // would fail schema validation and drop the whole snapshot.
+        assert_eq!(audio["latencyTrims"], 0);
+        assert_eq!(audio["latencyTrimmedMs"], 0.0);
+        assert!(audio["latencyTrims"].is_number());
+        assert!(audio["latencyTrimmedMs"].is_number());
+    }
+
     #[tokio::test]
     async fn an_idle_service_reports_null_latency_terms_rather_than_zero() {
         let handler = handler();

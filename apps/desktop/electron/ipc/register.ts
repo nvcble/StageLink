@@ -14,6 +14,7 @@ import { logger } from '../main/logger'
 import { REVEALABLE_PATHS, type RevealTarget } from '../main/paths'
 import type { ServiceSupervisor } from '../main/service-supervisor'
 import { openExternalUrl } from '../main/window'
+import { droppedKeys } from './payload-shape'
 
 /**
  * The renderer-facing IPC surface.
@@ -145,6 +146,18 @@ export function forwardServiceEvents(
           .join('; ')}`,
       )
       return
+    }
+
+    // A protocol bug, not a runtime one: the service is publishing something
+    // the schema does not carry, so the renderer will never see it. Logged
+    // rather than dropped — the rest of the payload is valid and a performer's
+    // monitor must not depend on a schema being exhaustive.
+    const lost = droppedKeys(payload, parsed.data)
+    if (lost.length > 0) {
+      logger.warn(
+        `${event} carried ${lost.length} field(s) the protocol does not declare, so they were ` +
+          `stripped before the renderer saw them: ${lost.join(', ')}`,
+      )
     }
 
     const window = getWindow()

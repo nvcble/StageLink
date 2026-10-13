@@ -84,6 +84,26 @@ const receivers = useReceiverStore()
           <dd class="stage-numeric mt-0.5">{{ diagnostics.audio.bufferUnderruns }}</dd>
         </div>
         <div>
+          <dt class="text-xs text-stage-muted">Backlog trims</dt>
+          <dd
+            class="stage-numeric mt-0.5"
+            :class="diagnostics.audio.latencyTrims > 0 ? 'text-stage-warning' : ''"
+            title="Times the capture backlog was discarded to hold latency down. Only happens when this machine fell behind the send cadence."
+          >
+            {{ diagnostics.audio.latencyTrims }}
+          </dd>
+        </div>
+        <div>
+          <dt class="text-xs text-stage-muted">Audio discarded</dt>
+          <dd
+            class="stage-numeric mt-0.5"
+            :class="diagnostics.audio.latencyTrimmedMs > 0 ? 'text-stage-warning' : ''"
+          >
+            {{ diagnostics.audio.latencyTrimmedMs.toFixed(1) }}
+            <span class="text-xs text-stage-muted">ms</span>
+          </dd>
+        </div>
+        <div>
           <dt class="text-xs text-stage-muted">Callback worst case</dt>
           <dd class="stage-numeric mt-0.5">
             {{ formatMicros(diagnostics.audio.callbackMaxUs) }}

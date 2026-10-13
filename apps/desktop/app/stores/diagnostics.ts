@@ -55,6 +55,28 @@ export const useDiagnosticsStore = defineStore('diagnostics', () => {
       if (audioDiagnostics.clipCount > 0) {
         warnings.push(`${audioDiagnostics.clipCount} clipped sample(s): reduce the monitor send`)
       }
+      if (audioDiagnostics.latencyTrims > 0) {
+        warnings.push(
+          `Discarded ${audioDiagnostics.latencyTrimmedMs.toFixed(0)} ms of audio over ` +
+            `${audioDiagnostics.latencyTrims} backlog trim(s): this machine fell behind the ` +
+            `send cadence, and listeners heard a seam each time`,
+        )
+      }
+    }
+
+    // Audio waiting in the send queue is delay every listener pays, and unlike
+    // a glitch nobody reports it — it just feels late. The threshold mirrors
+    // MAX_BACKLOG_PACKETS in the service, expressed against the configured
+    // packet duration rather than a hard-coded millisecond figure so it stays
+    // correct if the packet duration changes.
+    const latencyBreakdown = latency.value
+    const queueMs = latencyBreakdown?.sendQueueMs.value ?? null
+    const packetMs = latencyBreakdown?.packetFrameMs.value ?? null
+    if (queueMs !== null && packetMs !== null && queueMs > packetMs * 3) {
+      warnings.push(
+        `${queueMs.toFixed(1)} ms of audio is backed up in the send queue: every listener is ` +
+          `hearing the mix that much later than they need to`,
+      )
     }
     if (system.value && !system.value.realtimePriorityGranted && audioDiagnostics?.captureState === 'running') {
       warnings.push(

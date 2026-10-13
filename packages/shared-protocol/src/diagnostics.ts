@@ -48,6 +48,17 @@ export const audioDiagnosticsSchema = z.object({
   bufferOverruns: z.number().int().min(0),
   /** Capture ring buffer ran dry: the producer fell behind. */
   bufferUnderruns: z.number().int().min(0),
+  /**
+   * Times the capture backlog was trimmed to hold latency down.
+   *
+   * Not a fault in itself — it is latency being paid back rather than carried
+   * for the rest of the session — but it only happens when this machine failed
+   * to keep up with the send cadence, and the audio either side of a trim is
+   * not continuous. A figure that keeps climbing is the one to act on.
+   */
+  latencyTrims: z.number().int().min(0),
+  /** Audio those trims discarded, in milliseconds. */
+  latencyTrimmedMs: z.number().min(0),
   /** Driver-reported discontinuities. */
   xruns: z.number().int().min(0),
   /** Worst observed capture-callback duration, microseconds. */

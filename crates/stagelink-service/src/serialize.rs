@@ -414,6 +414,15 @@ pub fn diagnostics_snapshot(state: &ServiceState) -> Value {
         None,
     );
 
+    // Trimmed samples are only meaningful as a duration, and the rate that
+    // converts them is the negotiated one rather than the configured one.
+    let trimmed_ms = match (ring.as_ref(), audio.negotiated) {
+        (Some(stats), Some(negotiated)) if negotiated.format.sample_rate > 0 => {
+            (stats.trimmed_samples() as f64 * 1_000.0) / f64::from(negotiated.format.sample_rate)
+        }
+        _ => 0.0,
+    };
+
     let roster = state.roster.lock();
 
     json!({
@@ -425,6 +434,14 @@ pub fn diagnostics_snapshot(state: &ServiceState) -> Value {
             "framesCaptured": audio.frames_captured,
             "bufferOverruns": ring.as_ref().map_or(0, |stats| stats.overrun_events()),
             "bufferUnderruns": ring.as_ref().map_or(0, |stats| stats.underrun_events()),
+            // How often the capture backlog had to be discarded to hold latency
+            // down, and how much went with it. Reported because a trim is
+            // latency being paid back *after* it was already being heard: the
+            // counter is the only evidence that this machine fell behind the
+            // send cadence, and a silent recovery is how the original
+            // quarter-second delay went unnoticed for so long.
+            "latencyTrims": ring.as_ref().map_or(0, |stats| stats.trim_events()),
+            "latencyTrimmedMs": trimmed_ms,
             "xruns": audio.xruns,
             "callbackMaxUs": capture.as_ref().map_or(0, |stats| stats.callback_max_us()),
             "callbackAvgUs": capture.as_ref().map_or(0, |stats| stats.callback_avg_us()),
