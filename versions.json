@@ -1,7 +1,7 @@
 {
   "_comment": "Single source of truth for app versions. Edit with `npm run version` or the /version-update skill, never by hand — the script propagates these into the manifests and into the Dart constant the mobile app displays.",
   "desktop": {
-    "version": "0.1.1"
+    "version": "0.1.2"
   },
   "mobile": {
     "version": "0.2.1",
